@@ -1,7 +1,7 @@
 import { formatMarkdownDocument } from "./frontmatter.js";
-import type { WorkRecord, WorkspaceConfig } from "./model.js";
+import type { WorkMetadata, WorkspaceConfig } from "./model.js";
 
-export const TEMPLATE_NAMES = ["record", "brief", "plan"] as const;
+export const TEMPLATE_NAMES = ["record", "overview", "plan"] as const;
 
 export type TemplateName = (typeof TEMPLATE_NAMES)[number];
 
@@ -38,22 +38,16 @@ Record confirmed facts and decisions.
 Record the result and remaining work.
 `,
   },
-  brief: {
-    file: "brief.md",
+  overview: {
+    file: "overview.md",
     requiredPlaceholders: ["title"],
     contents: `# {{title}}
 
 ## Purpose
 
-Describe what this Work is and why it matters.
+Explain what this work item is and why it matters.
 
-## Current state
-
-Record the current state and next action.
-
-## Outcome
-
-Record the conclusion and remaining work.
+Keep status, progress, decisions, and outcomes in \`record.md\`.
 `,
   },
   plan: {
@@ -112,22 +106,22 @@ export function renderTemplate(
 }
 
 export function createRecordDocument(
-  record: WorkRecord,
+  metadata: WorkMetadata,
   template = TEMPLATE_DEFINITIONS.record.contents,
 ): string {
   return formatMarkdownDocument(
-    record,
-    renderTemplate(template, { title: record.title }),
+    metadata,
+    renderTemplate(template, { title: metadata.title }),
   );
 }
 
-export function createBriefDocument(
-  record: WorkRecord,
-  template = TEMPLATE_DEFINITIONS.brief.contents,
+export function createOverviewDocument(
+  metadata: WorkMetadata,
+  template = TEMPLATE_DEFINITIONS.overview.contents,
 ): string {
   return formatMarkdownDocument(
-    { schema: 1, id: record.id, title: record.title },
-    renderTemplate(template, { title: record.title }),
+    { schema: 1, id: metadata.id, title: metadata.title },
+    renderTemplate(template, { title: metadata.title }),
   );
 }
 
@@ -142,10 +136,10 @@ export function createRulesDocument(): string {
   return `# AIongside work rules
 
 1. Read the relevant \`work/<ID>/record.md\` before starting work.
-2. Create Work with \`aiongside work new\`.
+2. Create a work item with \`aiongside work new\`.
 3. Change status with \`aiongside work move\`.
-4. Preserve cancelled Work with \`aiongside work cancel\`.
-5. Run \`aiongside work discard <ID> --dry-run\` before discarding Work.
+4. Preserve cancelled work items with \`aiongside work cancel\`.
+5. Run \`aiongside work discard <ID> --dry-run\` before discarding a work item.
 6. Run \`aiongside check\` before finishing work.
 `;
 }

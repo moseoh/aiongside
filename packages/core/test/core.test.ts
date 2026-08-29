@@ -1,13 +1,14 @@
 import { describe, expect, test } from "vitest";
 import {
+  createOverviewDocument,
   createRecordDocument,
   formatMarkdownDocument,
   parseMarkdownDocument,
   renderViews,
-  workRecordSchema,
+  workMetadataSchema,
 } from "../src/index.js";
 
-const record = workRecordSchema.parse({
+const metadata = workMetadataSchema.parse({
   schema: 1,
   id: "AIO-001",
   title: "First task",
@@ -20,10 +21,10 @@ const record = workRecordSchema.parse({
 
 describe("Markdown document", () => {
   test("round-trips frontmatter and body", () => {
-    const source = createRecordDocument(record);
+    const source = createRecordDocument(metadata);
     const parsed = parseMarkdownDocument(source);
 
-    expect(workRecordSchema.parse(parsed.metadata)).toEqual(record);
+    expect(workMetadataSchema.parse(parsed.metadata)).toEqual(metadata);
     expect(
       formatMarkdownDocument(
         parsed.metadata as Record<string, unknown>,
@@ -31,12 +32,22 @@ describe("Markdown document", () => {
       ),
     ).toBe(source);
   });
+
+  test("keeps dynamic work state out of the default Overview", () => {
+    const source = createOverviewDocument(metadata);
+    const document = parseMarkdownDocument(source);
+
+    expect(document.body).toContain("## Purpose");
+    expect(document.body).not.toContain("## Current state");
+    expect(document.body).not.toContain("## Progress");
+    expect(document.body).not.toContain("## Outcome");
+  });
 });
 
 describe("views", () => {
   test("renders deterministic Views for the same input", () => {
-    const first = renderViews([record]);
-    const second = renderViews([record]);
+    const first = renderViews([metadata]);
+    const second = renderViews([metadata]);
 
     expect(first).toEqual(second);
     expect(first["views/open.md"]).toContain("AIO-001");

@@ -46,7 +46,7 @@ export const workspaceConfigSchema = z.object({
   idPrefix: z.string().regex(/^[A-Z][A-Z0-9]{1,7}$/),
 });
 
-export const workRecordSchema = z.object({
+export const workMetadataSchema = z.object({
   schema: z.literal(1),
   id: z.string().regex(/^[A-Z][A-Z0-9]{1,7}-\d{3,}$/),
   title: z
@@ -63,17 +63,17 @@ export const workRecordSchema = z.object({
   needs: z.array(z.string()).default([]),
 });
 
-export const briefMetadataSchema = z.object({
+export const overviewMetadataSchema = z.object({
   schema: z.literal(1),
   id: z.string().regex(/^[A-Z][A-Z0-9]{1,7}-\d{3,}$/),
   title: z.string().trim().min(1),
 });
 
 export type WorkspaceConfig = z.infer<typeof workspaceConfigSchema>;
-export type WorkRecord = z.infer<typeof workRecordSchema>;
-export type WorkStatus = WorkRecord["status"];
+export type WorkMetadata = z.infer<typeof workMetadataSchema>;
+export type WorkStatus = WorkMetadata["status"];
 export type MovableStatus = (typeof MOVABLE_STATUSES)[number];
-export type WorkType = WorkRecord["type"];
+export type WorkType = WorkMetadata["type"];
 
 export interface ValidationIssue {
   code: string;

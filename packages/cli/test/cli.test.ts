@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -68,5 +68,26 @@ describe("CLI", () => {
       "--dry-run",
     ]);
     expect(preview.stdout).toContain("No changes made");
+  });
+
+  test("reports View drift without writing and rebuilds explicitly", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    await cli(["--root", root, "work", "new", "View drift"]);
+    const viewPath = path.join(root, "views", "open.md");
+    const modified = `${await readFile(viewPath, "utf8")}Manual edit\n`;
+    await writeFile(viewPath, modified);
+
+    await expect(cli(["--root", root, "check"])).rejects.toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining("[AIO-VIEW-DRIFT] views/open.md"),
+    });
+    expect(await readFile(viewPath, "utf8")).toBe(modified);
+
+    const rebuilt = await cli(["--root", root, "view", "rebuild"]);
+    expect(rebuilt.stdout).toBe("Views rebuilt\n");
+    expect((await cli(["--root", root, "check"])).stdout).toBe(
+      "Check passed\n",
+    );
   });
 });

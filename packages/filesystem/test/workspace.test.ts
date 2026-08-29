@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   cancelWork,
   createWork,
@@ -11,8 +11,26 @@ import {
   moveWork,
   pathExists,
   previewDiscard,
+  rebuildViews,
   validateWorkspace,
 } from "../src/index.js";
+
+const writeFailure = vi.hoisted(() => ({ target: "" }));
+
+vi.mock("write-file-atomic", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("write-file-atomic")>();
+  const original = actual.default as (...args: unknown[]) => unknown;
+  return {
+    ...actual,
+    default: (...args: unknown[]) => {
+      if (args[0] === writeFailure.target) {
+        writeFailure.target = "";
+        return Promise.reject(new Error("Injected View write failure"));
+      }
+      return original(...args);
+    },
+  };
+});
 
 const roots: string[] = [];
 
@@ -33,6 +51,16 @@ describe("workspace lifecycle", () => {
   test("handles initialization, creation, movement, and cancellation", async () => {
     const root = await workspace();
     const created = await createWork(root, "First Work");
+    expect(
+      await pathExists(path.join(root, "work", created.id, "plan.md")),
+    ).toBe(false);
+    expect(
+      await pathExists(path.join(root, "work", created.id, "reports")),
+    ).toBe(true);
+    expect(
+      await pathExists(path.join(root, "work", created.id, "references")),
+    ).toBe(true);
+
     const active = await moveWork(root, created.id, "active");
     const cancelled = await cancelWork(root, created.id);
 
@@ -111,7 +139,154 @@ describe("workspace lifecycle", () => {
     expect(await validateWorkspace(root)).toEqual([]);
   });
 
-  test("does not move cancelled Work", async () => {
+  test("detects a manually modified View without rewriting it", async () => {
+    const root = await workspace();
+    await createWork(root, "Manual View edit");
+    const viewPath = path.join(root, "views", "open.md");
+    const modified = `${await readFile(viewPath, "utf8")}\nManual edit\n`;
+    await writeFile(viewPath, modified);
+
+    expect(await validateWorkspace(root)).toContainEqual({
+      code: "AIO-VIEW-DRIFT",
+      path: "views/open.md",
+      message: "Generated View does not match current Records.",
+      hint: "Run `aiongside view rebuild`.",
+    });
+    expect(await readFile(viewPath, "utf8")).toBe(modified);
+  });
+
+  test("detects deleted, added, and reordered View rows", async () => {
+    const mutations = [
+      (source: string) =>
+        source
+          .split("\n")
+          .filter((line) => !line.includes("AIO-001"))
+          .join("\n"),
+      (source: string) =>
+        `${source}| [AIO-999](../work/AIO-999/overview.md) | Invented | inbox | 2026-08-30 |\n`,
+      (source: string) => {
+        const lines = source.split("\n");
+        const first = lines.findIndex((line) => line.includes("AIO-001"));
+        const second = lines.findIndex((line) => line.includes("AIO-002"));
+        [lines[first], lines[second]] = [
+          lines[second] ?? "",
+          lines[first] ?? "",
+        ];
+        return lines.join("\n");
+      },
+    ];
+
+    for (const mutate of mutations) {
+      const root = await workspace();
+      await createWork(root, "First row");
+      await createWork(root, "Second row");
+      const viewPath = path.join(root, "views", "open.md");
+      await writeFile(viewPath, mutate(await readFile(viewPath, "utf8")));
+
+      expect(await validateWorkspace(root)).toContainEqual(
+        expect.objectContaining({
+          code: "AIO-VIEW-DRIFT",
+          path: "views/open.md",
+        }),
+      );
+    }
+  });
+
+  test("detects stale Views after direct Record metadata changes", async () => {
+    const root = await workspace();
+    const metadata = await createWork(root, "Stale View");
+    const recordPath = path.join(root, "work", metadata.id, "record.md");
+    const record = await readFile(recordPath, "utf8");
+    await writeFile(
+      recordPath,
+      record.replace("status: inbox", "status: done"),
+    );
+
+    const driftPaths = (await validateWorkspace(root))
+      .filter((issue) => issue.code === "AIO-VIEW-DRIFT")
+      .map((issue) => issue.path)
+      .sort();
+
+    expect(driftPaths).toEqual(["views/closed.md", "views/open.md"]);
+  });
+
+  test("treats line ending changes as View drift", async () => {
+    const root = await workspace();
+    const viewPath = path.join(root, "views", "open.md");
+    const source = await readFile(viewPath, "utf8");
+    await writeFile(viewPath, source.replaceAll("\n", "\r\n"));
+
+    expect(await validateWorkspace(root)).toContainEqual(
+      expect.objectContaining({
+        code: "AIO-VIEW-DRIFT",
+        path: "views/open.md",
+      }),
+    );
+  });
+
+  test("defers View comparison until invalid Record metadata is fixed", async () => {
+    const root = await workspace();
+    const metadata = await createWork(root, "Invalid Record");
+    const recordPath = path.join(root, "work", metadata.id, "record.md");
+    const record = await readFile(recordPath, "utf8");
+    await writeFile(
+      recordPath,
+      record.replace("status: inbox", "status: invalid"),
+    );
+
+    const issues = await validateWorkspace(root);
+
+    expect(issues).toContainEqual(
+      expect.objectContaining({ code: "AIO-SCHEMA-RECORD" }),
+    );
+    expect(issues.some((issue) => issue.code === "AIO-VIEW-DRIFT")).toBe(false);
+  });
+
+  test("rebuilds drifted Views from Records", async () => {
+    const root = await workspace();
+    await createWork(root, "Rebuild View");
+    const viewPath = path.join(root, "views", "open.md");
+    await writeFile(viewPath, "corrupted\n");
+
+    await rebuildViews(root);
+
+    expect(await validateWorkspace(root)).toEqual([]);
+    expect(await readFile(viewPath, "utf8")).toContain("Rebuild View");
+  });
+
+  test("refuses to rebuild Views from an invalid Record", async () => {
+    const root = await workspace();
+    const metadata = await createWork(root, "Invalid rebuild source");
+    const recordPath = path.join(root, "work", metadata.id, "record.md");
+    const record = await readFile(recordPath, "utf8");
+    await writeFile(
+      recordPath,
+      record.replace("status: inbox", "status: invalid"),
+    );
+
+    await expect(rebuildViews(root)).rejects.toMatchObject({
+      code: "AIO-WORKSPACE-INVALID",
+    });
+  });
+
+  test("restores both Views when a rebuild write fails", async () => {
+    const root = await workspace();
+    await createWork(root, "Rollback View rebuild");
+    const openPath = path.join(root, "views", "open.md");
+    const closedPath = path.join(root, "views", "closed.md");
+    await writeFile(openPath, "previous open\n");
+    await writeFile(closedPath, "previous closed\n");
+    writeFailure.target = closedPath;
+
+    await expect(rebuildViews(root)).rejects.toMatchObject({
+      code: "AIO-WRITE",
+    });
+
+    expect(await readFile(openPath, "utf8")).toBe("previous open\n");
+    expect(await readFile(closedPath, "utf8")).toBe("previous closed\n");
+  });
+
+  test("does not move a cancelled work item", async () => {
     const root = await workspace();
     const record = await createWork(root, "Cancelled Work");
     await cancelWork(root, record.id);
@@ -121,7 +296,7 @@ describe("workspace lifecycle", () => {
     });
   });
 
-  test("moves Work to trash after a discard preview", async () => {
+  test("moves a work item to trash after a discard preview", async () => {
     const root = await workspace();
     const record = await createWork(root, "Discard test");
     const preview = await previewDiscard(root, record.id);
@@ -186,14 +361,14 @@ describe("workspace lifecycle", () => {
   test("reports a missing required template placeholder", async () => {
     const root = await workspace();
     await writeFile(
-      path.join(root, ".aiongside", "templates", "brief.md"),
-      "# Static brief\n",
+      path.join(root, ".aiongside", "templates", "overview.md"),
+      "# Static overview\n",
     );
 
     expect(await validateWorkspace(root)).toContainEqual(
       expect.objectContaining({
         code: "AIO-TEMPLATE-PLACEHOLDER",
-        path: ".aiongside/templates/brief.md",
+        path: ".aiongside/templates/overview.md",
       }),
     );
   });

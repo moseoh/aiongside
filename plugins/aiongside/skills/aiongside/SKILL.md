@@ -1,6 +1,6 @@
 ---
 name: aiongside
-description: Manage local AIongside work records. Use when a workspace contains .aiongside/config.yaml or the user asks to initialize or operate an AIongside workspace.
+description: Manage local AIongside work Records and generated Views. Use when a workspace contains .aiongside/config.yaml or the user asks to initialize or operate an AIongside workspace.
 ---
 
 # AIongside
@@ -9,7 +9,7 @@ description: Manage local AIongside work records. Use when a workspace contains 
 
 1. Find the workspace root containing `.aiongside/config.yaml`.
 2. Read `.aiongside/rules.md` completely.
-3. Read the relevant `work/<ID>/record.md` before changing a Work.
+3. Read the relevant `work/<ID>/record.md` before changing a work item.
 
 ## Commands
 
@@ -18,6 +18,7 @@ description: Manage local AIongside work records. Use when a workspace contains 
 - Move: `aiongside work move <ID> <status>`
 - Cancel and retain history: `aiongside work cancel <ID>`
 - Preview discard: `aiongside work discard <ID> --dry-run`
+- Rebuild generated Views: `aiongside view rebuild`
 - Validate: `aiongside check`
 
 Use CLI commands for metadata and status changes. Do not hand-create IDs or rewrite generated View files.
@@ -29,7 +30,7 @@ Discard is always a two-step operation.
 1. Run `aiongside work discard <ID> --dry-run` and show the exact files, references, and trash target.
 2. Stop. Run `aiongside work discard <ID> --confirm <ID>` only after the user explicitly says to proceed.
 
-Cancellation is the default. Discard only when the Work has no record value and no incoming references.
+Cancellation is the default. Discard only when the work item has no history value and no incoming references.
 
 ## Finish
 

@@ -7,6 +7,7 @@ import {
   initializeWorkspace,
   moveWork,
   previewDiscard,
+  rebuildViews,
   validateWorkspace,
   WorkspaceError,
 } from "@aiongside/filesystem";
@@ -29,7 +30,7 @@ export function createProgram(): Command {
     .description("Create an AIongside workspace")
     .argument("[path]", "Directory to initialize", ".")
     .option("--name <name>", "Workspace name")
-    .option("--prefix <prefix>", "Work ID prefix", "AIO")
+    .option("--prefix <prefix>", "Work item ID prefix", "AIO")
     .action(async (target, options: { name?: string; prefix: string }) => {
       const root = path.resolve(target);
       const config = await initializeWorkspace(root, {
@@ -43,45 +44,45 @@ export function createProgram(): Command {
 
   const work = program
     .command("work")
-    .description("Create Work and manage its status");
+    .description("Create work items and manage their status");
 
   work
     .command("new")
-    .description("Create Work in inbox")
-    .argument("<title>", "Work title")
+    .description("Create a work item in inbox")
+    .argument("<title>", "Work item title")
     .action(async (title: string) => {
       const root = await commandRoot(program);
-      const record = await createWork(root, title);
+      const metadata = await createWork(root, title);
       process.stdout.write(
-        `Created: ${record.id} ${record.title}\nStatus: ${record.status}\n`,
+        `Created: ${metadata.id} ${metadata.title}\nStatus: ${metadata.status}\n`,
       );
     });
 
   work
     .command("move")
-    .description("Move Work to another status")
-    .argument("<id>", "Work ID")
+    .description("Move a work item to another status")
+    .argument("<id>", "Work item ID")
     .argument("<status>", "Target status")
     .action(async (id: string, status: string) => {
       const root = await commandRoot(program);
-      const record = await moveWork(root, id, status.toLowerCase());
-      process.stdout.write(`Moved: ${record.id} -> ${record.status}\n`);
+      const metadata = await moveWork(root, id, status.toLowerCase());
+      process.stdout.write(`Moved: ${metadata.id} -> ${metadata.status}\n`);
     });
 
   work
     .command("cancel")
-    .description("Cancel Work and preserve its record")
-    .argument("<id>", "Work ID")
+    .description("Cancel a work item and preserve its history")
+    .argument("<id>", "Work item ID")
     .action(async (id: string) => {
       const root = await commandRoot(program);
-      const record = await cancelWork(root, id);
-      process.stdout.write(`Cancelled: ${record.id}\nRecord preserved.\n`);
+      const metadata = await cancelWork(root, id);
+      process.stdout.write(`Cancelled: ${metadata.id}\nHistory preserved.\n`);
     });
 
   work
     .command("discard")
-    .description("Discard Work from the workspace")
-    .argument("<id>", "Work ID")
+    .description("Discard a work item from the workspace")
+    .argument("<id>", "Work item ID")
     .addOption(new Option("--dry-run", "Show discard effects without writing"))
     .addOption(
       new Option("--confirm <id>", "Confirm the exact ID and move it to trash"),
@@ -122,9 +123,20 @@ export function createProgram(): Command {
       },
     );
 
+  const view = program.command("view").description("Manage generated Views");
+
+  view
+    .command("rebuild")
+    .description("Rebuild Views from work Records")
+    .action(async () => {
+      const root = await commandRoot(program);
+      await rebuildViews(root);
+      process.stdout.write("Views rebuilt\n");
+    });
+
   program
     .command("check")
-    .description("Validate workspace structure and Records without writing")
+    .description("Validate workspace structure without writing")
     .action(async () => {
       const root = await commandRoot(program);
       const issues = await validateWorkspace(root);
