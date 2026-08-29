@@ -1,0 +1,158 @@
+import { formatMarkdownDocument } from "./frontmatter.js";
+import type { WorkRecord, WorkspaceConfig } from "./model.js";
+
+export const TEMPLATE_NAMES = ["record", "brief", "plan"] as const;
+
+export type TemplateName = (typeof TEMPLATE_NAMES)[number];
+
+export interface TemplateDefinition {
+  file: `${TemplateName}.md`;
+  contents: string;
+  requiredPlaceholders: readonly string[];
+}
+
+export const TEMPLATE_DEFINITIONS: Record<TemplateName, TemplateDefinition> = {
+  record: {
+    file: "record.md",
+    requiredPlaceholders: ["title"],
+    contents: `# {{title}}
+
+## Context
+
+Describe the confirmed context.
+
+## Scope
+
+- Included work
+
+## Completion criteria
+
+- [ ] A verifiable outcome
+
+## Progress
+
+Record confirmed facts and decisions.
+
+## Outcome
+
+Record the result and remaining work.
+`,
+  },
+  brief: {
+    file: "brief.md",
+    requiredPlaceholders: ["title"],
+    contents: `# {{title}}
+
+## Purpose
+
+Describe what this Work is and why it matters.
+
+## Current state
+
+Record the current state and next action.
+
+## Outcome
+
+Record the conclusion and remaining work.
+`,
+  },
+  plan: {
+    file: "plan.md",
+    requiredPlaceholders: [],
+    contents: `# Execution plan
+
+## Assumptions
+
+- A fact that must remain true for this plan to work
+
+## Current execution
+
+1. Planned change
+2. Verification method
+
+## Stop conditions
+
+- A condition that requires stopping or reverting the work
+`,
+  },
+};
+
+export function validateTemplate(name: TemplateName, source: string): string[] {
+  const definition = TEMPLATE_DEFINITIONS[name];
+  const issues: string[] = [];
+  const placeholders = [...source.matchAll(/\{\{\s*([^{}]+?)\s*\}\}/g)].map(
+    (match) => match[1] ?? "",
+  );
+
+  for (const required of definition.requiredPlaceholders) {
+    if (!placeholders.includes(required)) {
+      issues.push(`Missing required placeholder: {{${required}}}`);
+    }
+  }
+  for (const placeholder of new Set(placeholders)) {
+    if (placeholder !== "title") {
+      issues.push(`Unsupported placeholder: {{${placeholder}}}`);
+    }
+  }
+  return issues;
+}
+
+export function renderTemplate(
+  source: string,
+  variables: { title?: string } = {},
+): string {
+  let rendered = source.replaceAll("\r\n", "\n");
+  if (variables.title !== undefined) {
+    rendered = rendered.replace(
+      /\{\{\s*title\s*\}\}/g,
+      () => variables.title ?? "",
+    );
+  }
+  return rendered;
+}
+
+export function createRecordDocument(
+  record: WorkRecord,
+  template = TEMPLATE_DEFINITIONS.record.contents,
+): string {
+  return formatMarkdownDocument(
+    record,
+    renderTemplate(template, { title: record.title }),
+  );
+}
+
+export function createBriefDocument(
+  record: WorkRecord,
+  template = TEMPLATE_DEFINITIONS.brief.contents,
+): string {
+  return formatMarkdownDocument(
+    { schema: 1, id: record.id, title: record.title },
+    renderTemplate(template, { title: record.title }),
+  );
+}
+
+export function createPlanDocument(
+  template = TEMPLATE_DEFINITIONS.plan.contents,
+  title?: string,
+): string {
+  return `${renderTemplate(template, { ...(title ? { title } : {}) }).trimEnd()}\n`;
+}
+
+export function createRulesDocument(): string {
+  return `# AIongside work rules
+
+1. Read the relevant \`work/<ID>/record.md\` before starting work.
+2. Create Work with \`aiongside work new\`.
+3. Change status with \`aiongside work move\`.
+4. Preserve cancelled Work with \`aiongside work cancel\`.
+5. Run \`aiongside work discard <ID> --dry-run\` before discarding Work.
+6. Run \`aiongside check\` before finishing work.
+`;
+}
+
+export function createAgentEntryDocument(config: WorkspaceConfig): string {
+  return `# ${config.name} work instructions
+
+Read and follow [.aiongside/rules.md](.aiongside/rules.md) before every task.
+`;
+}

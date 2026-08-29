@@ -1,0 +1,29 @@
+{
+  "name": "aiongside-workspace",
+  "private": true,
+  "version": "0.0.0",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "bun@1.4.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc -b && bun run bundle",
+    "bundle": "bun build packages/cli/src/bin.ts --target=node --packages=bundle --outfile packages/cli/dist/bin.js",
+    "typecheck": "tsc -b --pretty false",
+    "test": "bun run build && node ./node_modules/vitest/vitest.mjs run",
+    "lint": "biome check .",
+    "check:english": "node scripts/check-english.mjs",
+    "check": "bun run typecheck && bun run test && bun run lint && bun run check:english"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.0.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^6.0.0",
+    "vitest": "^4.0.0"
+  }
+}

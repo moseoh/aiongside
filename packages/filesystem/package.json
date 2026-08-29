@@ -1,0 +1,25 @@
+{
+  "name": "@aiongside/filesystem",
+  "private": true,
+  "version": "0.0.0",
+  "license": "MIT",
+  "type": "module",
+  "exports": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@aiongside/core": "workspace:*",
+    "proper-lockfile": "^4.1.2",
+    "write-file-atomic": "^7.0.0",
+    "yaml": "^2.0.0"
+  },
+  "devDependencies": {
+    "@types/proper-lockfile": "^4.1.4",
+    "@types/write-file-atomic": "^4.0.3"
+  }
+}

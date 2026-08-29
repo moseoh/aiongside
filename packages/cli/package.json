@@ -1,0 +1,30 @@
+{
+  "name": "aiongside",
+  "version": "0.0.0",
+  "description": "A local-first workspace for people and AI",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moseoh/aiongside.git"
+  },
+  "homepage": "https://github.com/moseoh/aiongside#readme",
+  "bugs": "https://github.com/moseoh/aiongside/issues",
+  "engines": {
+    "node": ">=22"
+  },
+  "type": "module",
+  "bin": {
+    "aiongside": "./dist/bin.js"
+  },
+  "files": [
+    "dist/bin.js"
+  ],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "devDependencies": {
+    "@aiongside/core": "workspace:*",
+    "@aiongside/filesystem": "workspace:*",
+    "commander": "^14.0.0"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "aiongside",
+  "version": "0.0.0",
+  "description": "Manage a local AIongside work workspace from Claude Code.",
+  "author": {
+    "name": "moseoh"
+  },
+  "keywords": ["local-first", "work-management", "markdown", "ai"]
+}

@@ -1,0 +1,19 @@
+{
+  "name": "aiongside",
+  "version": "0.0.0",
+  "description": "Manage a local AIongside work workspace from Codex.",
+  "author": {
+    "name": "moseoh"
+  },
+  "keywords": ["local-first", "work-management", "markdown", "ai"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "AIongside",
+    "shortDescription": "Manage local work records with AI.",
+    "longDescription": "Create, move, cancel, discard, and validate local AIongside work records without a hosted service.",
+    "developerName": "moseoh",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": ["Show my current AIongside work and help me continue it."]
+  }
+}
