@@ -31,6 +31,15 @@ describe("CLI", () => {
 
     const initialized = await cli(["init", root, "--name", "Workspace"]);
     const created = await cli(["--root", root, "work", "new", "First Work"]);
+    const confirmed = await cli([
+      "--root",
+      root,
+      "work",
+      "confirm",
+      "AIO-001",
+      "scope",
+      "completion",
+    ]);
     const moved = await cli([
       "--root",
       root,
@@ -43,6 +52,7 @@ describe("CLI", () => {
 
     expect(initialized.stdout).toContain("Initialized");
     expect(created.stdout).toContain("AIO-001 First Work");
+    expect(confirmed.stdout).toContain("AIO-001 scope, completion");
     expect(moved.stdout).toContain("AIO-001 -> active");
     expect(checked.stdout).toBe("Check passed\n");
   });

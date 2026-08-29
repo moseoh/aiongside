@@ -11,6 +11,7 @@ import {
   formatMarkdownDocument,
   idNumber,
   isMovableStatus,
+  isWorkCheck,
   overviewMetadataSchema,
   parseMarkdownDocument,
   renderViews,
@@ -19,6 +20,7 @@ import {
   type TemplateName,
   type ValidationIssue,
   validateTemplate,
+  type WorkCheck,
   type WorkMetadata,
   type WorkspaceConfig,
   workMetadataSchema,
@@ -212,6 +214,13 @@ export async function createWork(
       created: today,
       updated: today,
       needs: [],
+      checks: {
+        scope: false,
+        completion: false,
+        verification: false,
+        outcome: false,
+        knowledge: false,
+      },
     });
 
     const staging = path.join(
@@ -272,14 +281,46 @@ export async function moveWork(
       "AIO-WORK-STATUS",
     );
   }
-  return updateWork(root, id, (metadata) => {
-    if (metadata.status === "cancelled") {
+  return updateWork(
+    root,
+    id,
+    (metadata) => {
+      if (metadata.status === "cancelled") {
+        throw new WorkspaceError(
+          "Cancelled work items cannot be moved.",
+          "AIO-WORK-TERMINAL",
+        );
+      }
+      return { ...metadata, status: targetStatus };
+    },
+    { enforceState: true },
+  );
+}
+
+export async function confirmWork(
+  root: string,
+  id: string,
+  checks: string[],
+): Promise<WorkMetadata> {
+  const normalized = [...new Set(checks.map((check) => check.toLowerCase()))];
+  if (normalized.length === 0) {
+    throw new WorkspaceError("Confirm at least one check.", "AIO-WORK-CHECK");
+  }
+  for (const check of normalized) {
+    if (!isWorkCheck(check)) {
       throw new WorkspaceError(
-        "Cancelled work items cannot be moved.",
-        "AIO-WORK-TERMINAL",
+        `Unknown work check: ${check}`,
+        "AIO-WORK-CHECK",
       );
     }
-    return { ...metadata, status: targetStatus };
+  }
+
+  return updateWork(root, id, (metadata) => {
+    const nextChecks = { ...metadata.checks };
+    for (const check of normalized as WorkCheck[]) {
+      nextChecks[check] = true;
+    }
+    return { ...metadata, checks: nextChecks };
   });
 }
 
@@ -407,6 +448,7 @@ export async function validateWorkspace(
   const seen = new Set<string>();
   const viewMetadata: WorkMetadata[] = [];
   let canCompareViews = true;
+  let canValidateRelations = true;
   for (const entry of entries) {
     if (!entry.isDirectory()) {
       issues.push({
@@ -433,6 +475,7 @@ export async function validateWorkspace(
       document = parseMarkdownDocument(await readFile(recordPath, "utf8"));
     } catch (error) {
       canCompareViews = false;
+      canValidateRelations = false;
       issues.push({
         code: "AIO-STRUCTURE-RECORD",
         path: relative(root, recordPath),
@@ -443,6 +486,7 @@ export async function validateWorkspace(
     const result = workMetadataSchema.safeParse(document.metadata);
     if (!result.success) {
       canCompareViews = false;
+      canValidateRelations = false;
       for (const issue of result.error.issues) {
         issues.push({
           code: "AIO-SCHEMA-RECORD",
@@ -458,6 +502,7 @@ export async function validateWorkspace(
       issues.push(...(await validateOverview(root, overviewPath, metadata)));
     }
     if (!metadata.id.startsWith(`${config.idPrefix}-`)) {
+      canValidateRelations = false;
       issues.push({
         code: "AIO-IDENTITY-PREFIX",
         path: relative(root, recordPath),
@@ -465,6 +510,7 @@ export async function validateWorkspace(
       });
     }
     if (entry.name !== metadata.id) {
+      canValidateRelations = false;
       issues.push({
         code: "AIO-IDENTITY-DIRECTORY",
         path: relative(root, directoryPath),
@@ -472,6 +518,7 @@ export async function validateWorkspace(
       });
     }
     if (seen.has(metadata.id)) {
+      canValidateRelations = false;
       issues.push({
         code: "AIO-IDENTITY-DUPLICATE",
         path: relative(root, recordPath),
@@ -479,6 +526,13 @@ export async function validateWorkspace(
       });
     }
     seen.add(metadata.id);
+  }
+  if (canValidateRelations) {
+    issues.push(...validateDependencies(viewMetadata));
+    const byId = new Map(viewMetadata.map((item) => [item.id, item]));
+    for (const metadata of viewMetadata) {
+      issues.push(...validateWorkState(metadata, byId));
+    }
   }
   issues.push(...(await validateViews(root, viewMetadata, canCompareViews)));
   return issues;
@@ -488,9 +542,13 @@ async function updateWork(
   root: string,
   id: string,
   update: (record: WorkMetadata) => WorkMetadata,
+  options: { enforceState?: boolean } = {},
 ): Promise<WorkMetadata> {
   return withWorkspaceLock(root, async () => {
-    await assertMutationSafe(root);
+    await assertMutationSafe(root, [
+      "AIO-STATE-GATE",
+      "AIO-DEPENDENCY-BLOCKED",
+    ]);
     const normalizedId = id.trim().toUpperCase();
     const works = await listWorks(root);
     const loaded = works.find((work) => work.metadata.id === normalizedId);
@@ -504,6 +562,19 @@ async function updateWork(
       ...update(loaded.metadata),
       updated: isoToday(),
     });
+    if (options.enforceState) {
+      const byId = new Map(
+        works.map((work) => [work.metadata.id, work.metadata]),
+      );
+      byId.set(record.id, record);
+      const issue = validateWorkState(record, byId)[0];
+      if (issue) {
+        throw new WorkspaceError(
+          `${issue.message}${issue.hint ? ` ${issue.hint}` : ""}`,
+          issue.code,
+        );
+      }
+    }
     const document = parseMarkdownDocument(loaded.source);
     const recordPath = path.join(root, WORK_DIR, normalizedId, RECORD_NAME);
     await atomicWrite(
@@ -544,6 +615,137 @@ async function updateWork(
       throw error;
     }
   });
+}
+
+function validateDependencies(metadata: WorkMetadata[]): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const byId = new Map(metadata.map((item) => [item.id, item]));
+  const sorted = [...metadata].sort((left, right) =>
+    left.id.localeCompare(right.id),
+  );
+
+  for (const item of sorted) {
+    const seen = new Set<string>();
+    for (const [index, dependency] of item.needs.entries()) {
+      const issuePath = workFieldPath(item.id, `needs.${index}`);
+      if (dependency === item.id) {
+        issues.push({
+          code: "AIO-DEPENDENCY-SELF",
+          path: issuePath,
+          message: "A work item cannot depend on itself.",
+        });
+      }
+      if (seen.has(dependency)) {
+        issues.push({
+          code: "AIO-DEPENDENCY-DUPLICATE",
+          path: issuePath,
+          message: `Duplicate dependency: ${dependency}`,
+        });
+      }
+      seen.add(dependency);
+      if (!byId.has(dependency)) {
+        issues.push({
+          code: "AIO-DEPENDENCY-MISSING",
+          path: issuePath,
+          message: `Dependency does not exist: ${dependency}`,
+        });
+      }
+    }
+  }
+
+  const state = new Map<string, "visiting" | "visited">();
+  const stack: string[] = [];
+  const reported = new Set<string>();
+
+  const visit = (id: string): void => {
+    state.set(id, "visiting");
+    stack.push(id);
+    const item = byId.get(id);
+    const dependencies = [...new Set(item?.needs ?? [])].sort();
+    for (const dependency of dependencies) {
+      if (dependency === id || !byId.has(dependency)) {
+        continue;
+      }
+      const dependencyState = state.get(dependency);
+      if (dependencyState === undefined) {
+        visit(dependency);
+        continue;
+      }
+      if (dependencyState === "visiting") {
+        const start = stack.indexOf(dependency);
+        const cycle = [...stack.slice(start), dependency];
+        const key = [...new Set(cycle)].sort().join("|");
+        if (!reported.has(key)) {
+          reported.add(key);
+          issues.push({
+            code: "AIO-DEPENDENCY-CYCLE",
+            path: workFieldPath(dependency, "needs"),
+            message: `Dependency cycle: ${cycle.join(" -> ")}`,
+          });
+        }
+      }
+    }
+    stack.pop();
+    state.set(id, "visited");
+  };
+
+  for (const item of sorted) {
+    if (state.get(item.id) === undefined) {
+      visit(item.id);
+    }
+  }
+  return issues;
+}
+
+function validateWorkState(
+  metadata: WorkMetadata,
+  byId: Map<string, WorkMetadata>,
+): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  const readyStatuses = new Set(["ready", "active", "verify", "done"]);
+  const verificationStatuses = new Set(["verify", "done"]);
+
+  const requireCheck = (check: WorkCheck, description: string): void => {
+    if (!metadata.checks[check]) {
+      issues.push({
+        code: "AIO-STATE-GATE",
+        path: workFieldPath(metadata.id, `checks.${check}`),
+        message: `Status ${metadata.status} requires confirmed ${description}.`,
+        hint: `Run \`aiongside work confirm ${metadata.id} ${check}\` after reviewing the Record.`,
+      });
+    }
+  };
+
+  if (readyStatuses.has(metadata.status)) {
+    requireCheck("scope", "scope");
+    requireCheck("completion", "completion criteria");
+  }
+  if (verificationStatuses.has(metadata.status)) {
+    requireCheck("verification", "verification");
+  }
+  if (metadata.status === "done") {
+    requireCheck("outcome", "outcome");
+    requireCheck("knowledge", "knowledge review");
+  }
+
+  if (["active", "verify", "done"].includes(metadata.status)) {
+    for (const [index, dependencyId] of metadata.needs.entries()) {
+      const dependency = byId.get(dependencyId);
+      if (dependency && dependency.status !== "done") {
+        issues.push({
+          code: "AIO-DEPENDENCY-BLOCKED",
+          path: workFieldPath(metadata.id, `needs.${index}`),
+          message: `Status ${metadata.status} requires dependency ${dependencyId} to be done; current status is ${dependency.status}.`,
+          hint: `Complete ${dependencyId} before starting this work item.`,
+        });
+      }
+    }
+  }
+  return issues;
+}
+
+function workFieldPath(id: string, field: string): string {
+  return `${WORK_DIR}/${id}/${RECORD_NAME}#${field}`;
 }
 
 async function validateOverview(
@@ -750,10 +952,17 @@ async function withWorkspaceLock<T>(
   }
 }
 
-async function assertMutationSafe(root: string): Promise<void> {
+async function assertMutationSafe(
+  root: string,
+  allowedCodes: readonly string[] = [],
+): Promise<void> {
+  const allowed = new Set([
+    "AIO-STRUCTURE-VIEW",
+    "AIO-VIEW-DRIFT",
+    ...allowedCodes,
+  ]);
   const blocking = (await validateWorkspace(root)).filter(
-    (issue) =>
-      issue.code !== "AIO-STRUCTURE-VIEW" && issue.code !== "AIO-VIEW-DRIFT",
+    (issue) => !allowed.has(issue.code),
   );
   const first = blocking[0];
   if (first) {

@@ -33,9 +33,17 @@ Describe the confirmed context.
 
 Record confirmed facts and decisions.
 
+## Verification
+
+Record the verification method and observed result.
+
 ## Outcome
 
 Record the result and remaining work.
+
+## Knowledge review
+
+Record what persistent knowledge changed, or why no update was needed.
 `,
   },
   overview: {
@@ -138,9 +146,10 @@ export function createRulesDocument(): string {
 1. Read the relevant \`work/<ID>/record.md\` before starting work.
 2. Create a work item with \`aiongside work new\`.
 3. Change status with \`aiongside work move\`.
-4. Preserve cancelled work items with \`aiongside work cancel\`.
-5. Run \`aiongside work discard <ID> --dry-run\` before discarding a work item.
-6. Run \`aiongside check\` before finishing work.
+4. Confirm completed checks with \`aiongside work confirm\`.
+5. Preserve cancelled work items with \`aiongside work cancel\`.
+6. Run \`aiongside work discard <ID> --dry-run\` before discarding a work item.
+7. Run \`aiongside check\` before finishing work.
 `;
 }
 

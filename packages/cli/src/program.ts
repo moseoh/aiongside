@@ -1,6 +1,7 @@
 import path from "node:path";
 import {
   cancelWork,
+  confirmWork,
   createWork,
   discardWork,
   findWorkspaceRoot,
@@ -67,6 +68,22 @@ export function createProgram(): Command {
       const root = await commandRoot(program);
       const metadata = await moveWork(root, id, status.toLowerCase());
       process.stdout.write(`Moved: ${metadata.id} -> ${metadata.status}\n`);
+    });
+
+  work
+    .command("confirm")
+    .description("Confirm work checks required by status gates")
+    .argument("<id>", "Work item ID")
+    .argument(
+      "<checks...>",
+      "scope, completion, verification, outcome, knowledge",
+    )
+    .action(async (id: string, checks: string[]) => {
+      const root = await commandRoot(program);
+      const metadata = await confirmWork(root, id, checks);
+      process.stdout.write(
+        `Confirmed: ${metadata.id} ${checks.map((check) => check.toLowerCase()).join(", ")}\n`,
+      );
     });
 
   work

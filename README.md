@@ -58,11 +58,29 @@ views/
 
 Views are generated from Record metadata and must not be edited directly. `aiongside check` compares each View with a deterministic rendering of current Records. Missing, stale, manually modified, or line-ending-converted Views fail validation without changing files. Run `aiongside view rebuild` for explicit recovery.
 
+## Status gates
+
+AIongside validates review signals stored in Record frontmatter. Confirm them after reviewing the corresponding Record content:
+
+```sh
+aiongside work confirm AIO-001 scope completion
+aiongside work confirm AIO-001 verification
+aiongside work confirm AIO-001 outcome knowledge
+```
+
+- `ready`, `active`, `verify`, and `done` require `scope` and `completion`.
+- `verify` and `done` require `verification`.
+- `done` requires `outcome` and `knowledge`.
+- `active`, `verify`, and `done` require every ID in `needs` to be `done`.
+
+`needs` contains stable work item IDs in Record frontmatter. `aiongside check` rejects missing, duplicate, self-referencing, and cyclic dependencies. Confirmations are mechanical review signals; they do not prove that prose is true or complete.
+
 ## Commands
 
 ```text
 aiongside init
 aiongside work new <title>
+aiongside work confirm <id> <checks...>
 aiongside work move <id> <status>
 aiongside work cancel <id>
 aiongside work discard <id> --dry-run

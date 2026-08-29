@@ -17,6 +17,13 @@ const metadata = workMetadataSchema.parse({
   created: "2026-08-30",
   updated: "2026-08-30",
   needs: [],
+  checks: {
+    scope: false,
+    completion: false,
+    verification: false,
+    outcome: false,
+    knowledge: false,
+  },
 });
 
 describe("Markdown document", () => {

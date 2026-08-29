@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   cancelWork,
+  confirmWork,
   createWork,
   discardWork,
   initializeWorkspace,
@@ -47,6 +48,19 @@ async function workspace(): Promise<string> {
   return root;
 }
 
+async function setNeeds(
+  root: string,
+  id: string,
+  needs: string[],
+): Promise<void> {
+  const recordPath = path.join(root, "work", id, "record.md");
+  const source = await readFile(recordPath, "utf8");
+  const replacement = needs.length
+    ? `needs:\n${needs.map((dependency) => `  - ${dependency}`).join("\n")}`
+    : "needs: []";
+  await writeFile(recordPath, source.replace("needs: []", replacement));
+}
+
 describe("workspace lifecycle", () => {
   test("handles initialization, creation, movement, and cancellation", async () => {
     const root = await workspace();
@@ -61,6 +75,7 @@ describe("workspace lifecycle", () => {
       await pathExists(path.join(root, "work", created.id, "references")),
     ).toBe(true);
 
+    await confirmWork(root, created.id, ["scope", "completion"]);
     const active = await moveWork(root, created.id, "active");
     const cancelled = await cancelWork(root, created.id);
 
@@ -89,6 +104,112 @@ describe("workspace lifecycle", () => {
       "AIO-002",
       "AIO-003",
     ]);
+  });
+
+  test("validates dependency targets, uniqueness, self-reference, and cycles", async () => {
+    const root = await workspace();
+    const first = await createWork(root, "First dependency node");
+    const second = await createWork(root, "Second dependency node");
+    await setNeeds(root, first.id, [first.id, "AIO-999", second.id, second.id]);
+    await setNeeds(root, second.id, [first.id]);
+
+    const codes = new Set(
+      (await validateWorkspace(root)).map((issue) => issue.code),
+    );
+
+    expect(codes).toEqual(
+      new Set([
+        "AIO-DEPENDENCY-CYCLE",
+        "AIO-DEPENDENCY-DUPLICATE",
+        "AIO-DEPENDENCY-MISSING",
+        "AIO-DEPENDENCY-SELF",
+      ]),
+    );
+  });
+
+  test("requires completed dependencies before active work", async () => {
+    const root = await workspace();
+    const dependency = await createWork(root, "Required work");
+    const dependent = await createWork(root, "Blocked work");
+    await setNeeds(root, dependent.id, [dependency.id]);
+    await confirmWork(root, dependent.id, ["scope", "completion"]);
+
+    await expect(moveWork(root, dependent.id, "active")).rejects.toMatchObject({
+      code: "AIO-DEPENDENCY-BLOCKED",
+    });
+
+    await confirmWork(root, dependency.id, [
+      "scope",
+      "completion",
+      "verification",
+      "outcome",
+      "knowledge",
+    ]);
+    await moveWork(root, dependency.id, "done");
+
+    expect((await moveWork(root, dependent.id, "active")).status).toBe(
+      "active",
+    );
+    expect(await validateWorkspace(root)).toEqual([]);
+  });
+
+  test("enforces confirmations for ready, verify, and done", async () => {
+    const root = await workspace();
+    const metadata = await createWork(root, "Gated work");
+
+    await expect(moveWork(root, metadata.id, "ready")).rejects.toMatchObject({
+      code: "AIO-STATE-GATE",
+    });
+    await confirmWork(root, metadata.id, ["scope"]);
+    await expect(moveWork(root, metadata.id, "ready")).rejects.toMatchObject({
+      code: "AIO-STATE-GATE",
+    });
+    await confirmWork(root, metadata.id, ["completion"]);
+    expect((await moveWork(root, metadata.id, "ready")).status).toBe("ready");
+
+    await expect(moveWork(root, metadata.id, "verify")).rejects.toMatchObject({
+      code: "AIO-STATE-GATE",
+    });
+    await confirmWork(root, metadata.id, ["verification"]);
+    expect((await moveWork(root, metadata.id, "verify")).status).toBe("verify");
+
+    await expect(moveWork(root, metadata.id, "done")).rejects.toMatchObject({
+      code: "AIO-STATE-GATE",
+    });
+    await confirmWork(root, metadata.id, ["outcome"]);
+    await expect(moveWork(root, metadata.id, "done")).rejects.toMatchObject({
+      code: "AIO-STATE-GATE",
+    });
+    await confirmWork(root, metadata.id, ["knowledge"]);
+    expect((await moveWork(root, metadata.id, "done")).status).toBe("done");
+    expect(await validateWorkspace(root)).toEqual([]);
+  });
+
+  test("detects state and dependency gates bypassed by manual edits", async () => {
+    const root = await workspace();
+    const dependency = await createWork(root, "Unfinished dependency");
+    const dependent = await createWork(root, "Manually started work");
+    await setNeeds(root, dependent.id, [dependency.id]);
+    const recordPath = path.join(root, "work", dependent.id, "record.md");
+    const record = await readFile(recordPath, "utf8");
+    await writeFile(
+      recordPath,
+      record.replace("status: inbox", "status: active"),
+    );
+
+    const codes = (await validateWorkspace(root)).map((issue) => issue.code);
+
+    expect(codes).toContain("AIO-STATE-GATE");
+    expect(codes).toContain("AIO-DEPENDENCY-BLOCKED");
+  });
+
+  test("rejects unknown work checks", async () => {
+    const root = await workspace();
+    const metadata = await createWork(root, "Unknown check");
+
+    await expect(
+      confirmWork(root, metadata.id, ["unsupported"]),
+    ).rejects.toMatchObject({ code: "AIO-WORK-CHECK" });
   });
 
   test("detects a mismatch between Record and directory IDs", async () => {
@@ -324,6 +445,7 @@ describe("workspace lifecycle", () => {
     );
 
     const record = await createWork(root, "Custom template");
+    await confirmWork(root, record.id, ["scope", "completion"]);
     await moveWork(root, record.id, "active");
     const source = await readFile(
       path.join(root, "work", record.id, "record.md"),

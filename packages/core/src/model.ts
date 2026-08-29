@@ -26,6 +26,14 @@ export const WORK_TYPES = [
   "maintenance",
 ] as const;
 
+export const WORK_CHECKS = [
+  "scope",
+  "completion",
+  "verification",
+  "outcome",
+  "knowledge",
+] as const;
+
 const isoDate = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Must use YYYY-MM-DD format")
@@ -46,6 +54,14 @@ export const workspaceConfigSchema = z.object({
   idPrefix: z.string().regex(/^[A-Z][A-Z0-9]{1,7}$/),
 });
 
+export const workChecksSchema = z.object({
+  scope: z.boolean(),
+  completion: z.boolean(),
+  verification: z.boolean(),
+  outcome: z.boolean(),
+  knowledge: z.boolean(),
+});
+
 export const workMetadataSchema = z.object({
   schema: z.literal(1),
   id: z.string().regex(/^[A-Z][A-Z0-9]{1,7}-\d{3,}$/),
@@ -60,7 +76,8 @@ export const workMetadataSchema = z.object({
   type: z.enum(WORK_TYPES),
   created: isoDate,
   updated: isoDate,
-  needs: z.array(z.string()).default([]),
+  needs: z.array(z.string().regex(/^[A-Z][A-Z0-9]{1,7}-\d{3,}$/)).default([]),
+  checks: workChecksSchema,
 });
 
 export const overviewMetadataSchema = z.object({
@@ -74,6 +91,7 @@ export type WorkMetadata = z.infer<typeof workMetadataSchema>;
 export type WorkStatus = WorkMetadata["status"];
 export type MovableStatus = (typeof MOVABLE_STATUSES)[number];
 export type WorkType = WorkMetadata["type"];
+export type WorkCheck = (typeof WORK_CHECKS)[number];
 
 export interface ValidationIssue {
   code: string;
@@ -84,6 +102,10 @@ export interface ValidationIssue {
 
 export function isMovableStatus(value: string): value is MovableStatus {
   return (MOVABLE_STATUSES as readonly string[]).includes(value);
+}
+
+export function isWorkCheck(value: string): value is WorkCheck {
+  return (WORK_CHECKS as readonly string[]).includes(value);
 }
 
 export function idNumber(id: string): number {

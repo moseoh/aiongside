@@ -15,13 +15,16 @@ description: Manage local AIongside work Records and generated Views. Use when a
 
 - Initialize: `aiongside init`
 - Create: `aiongside work new "<title>"`
+- Confirm reviewed gates: `aiongside work confirm <ID> <checks...>`
 - Move: `aiongside work move <ID> <status>`
 - Cancel and retain history: `aiongside work cancel <ID>`
 - Preview discard: `aiongside work discard <ID> --dry-run`
 - Rebuild generated Views: `aiongside view rebuild`
 - Validate: `aiongside check`
 
-Use CLI commands for metadata and status changes. Do not hand-create IDs or rewrite generated View files.
+Use CLI commands for creation, status changes, confirmations, and discard. Edit other Record metadata only when no command exists. Do not hand-create IDs or rewrite generated View files.
+
+Before moving to `ready`, confirm `scope` and `completion`. Before moving to `verify`, confirm `verification`. Before moving to `done`, confirm `outcome` and `knowledge`. Dependencies in `needs` must be `done` before a work item becomes `active`.
 
 ## Discard
 
