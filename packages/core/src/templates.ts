@@ -150,9 +150,11 @@ export function createRulesDocument(): string {
 3. Preview every status change with \`aiongside work move <ID> <status> --dry-run --json\`.
 4. Ask the user for every input listed in \`missingInputs\` and pass each answer through its explicit CLI option.
 5. Confirm completed checks with \`aiongside work confirm\` before moving to \`done\`.
-6. Apply the status change with \`aiongside work move\`; use \`work cancel\` only as a cancellation alias.
-7. Run \`aiongside work discard <ID> --dry-run\` before discarding a work item.
-8. Run \`aiongside check\` before finishing work.
+6. Manage dependencies with \`aiongside work needs add\` and \`aiongside work needs remove\`; do not edit \`needs\` in frontmatter directly.
+7. Reopen \`done\` work before changing its dependencies.
+8. Apply the status change with \`aiongside work move\`; use \`work cancel\` only as a cancellation alias.
+9. Run \`aiongside work discard <ID> --dry-run\` before discarding a work item.
+10. Run \`aiongside check\` before finishing work.
 `;
 }
 

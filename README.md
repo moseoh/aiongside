@@ -7,7 +7,7 @@ The first goal is simple local work management. The second goal is a validation 
 ## Status
 
 - MVP CLI implemented.
-- Workspace initialization, work item creation, status movement, cancellation, safe discard, and validation implemented.
+- Workspace initialization, work item creation, status movement, dependency management, cancellation, safe discard, and validation implemented.
 - Editable workspace templates implemented.
 - npm publishing not started.
 - TypeScript monorepo managed with Bun.
@@ -92,7 +92,14 @@ aiongside work confirm AIO-001 outcome knowledge
 - Leaving `done` requires `--reopen-reason` or `--cancellation-reason`, invalidates the completion seal, and resets verification, outcome, and knowledge confirmations.
 - Changing completion-relevant content while the status remains `done` fails `aiongside check`.
 
-`needs` contains stable work item IDs in Record frontmatter. `aiongside check` rejects missing, duplicate, self-referencing, and cyclic dependencies. Confirmations are mechanical review signals; they do not prove that prose is true or complete.
+`needs` contains stable work item IDs in Record frontmatter. Manage it through the CLI instead of editing frontmatter directly:
+
+```sh
+aiongside work needs add AIO-002 AIO-001
+aiongside work needs remove AIO-002 AIO-001
+```
+
+Adding a dependency rejects missing, duplicate, self-referencing, and cyclic relationships. Removing an absent relationship succeeds without changing files. Reopen `done` work before changing its dependencies. Confirmations are mechanical review signals; they do not prove that prose is true or complete.
 
 ## Commands
 
@@ -102,6 +109,8 @@ aiongside work new <title>
 aiongside work confirm <id> <checks...>
 aiongside work move <id> <status> --dry-run --json
 aiongside work move <id> <status> [transition options]
+aiongside work needs add <id> <dependency-id>
+aiongside work needs remove <id> <dependency-id>
 aiongside work cancel <id> --cancellation-reason <text>
 aiongside work discard <id> --dry-run
 aiongside view rebuild

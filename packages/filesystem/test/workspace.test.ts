@@ -9,6 +9,7 @@ import {
 } from "@aiongside/core";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
+  addWorkDependency,
   cancelWork,
   confirmWork,
   createWork,
@@ -20,6 +21,7 @@ import {
   previewDiscard,
   previewMoveWork,
   rebuildViews,
+  removeWorkDependency,
   validateWorkspace,
 } from "../src/index.js";
 
@@ -150,6 +152,196 @@ describe("workspace lifecycle", () => {
         "AIO-DEPENDENCY-SELF",
       ]),
     );
+  });
+
+  test("preflights dependency additions against the full graph", async () => {
+    const root = await workspace();
+    const first = await createWork(root, "First dependency node");
+    const second = await createWork(root, "Second dependency node");
+
+    await expect(
+      addWorkDependency(root, "AIO-999", second.id),
+    ).rejects.toMatchObject({ code: "AIO-WORK-NOT-FOUND" });
+    await expect(
+      addWorkDependency(root, first.id, "AIO-999"),
+    ).rejects.toMatchObject({ code: "AIO-DEPENDENCY-MISSING" });
+    await expect(
+      addWorkDependency(root, first.id, first.id),
+    ).rejects.toMatchObject({ code: "AIO-DEPENDENCY-SELF" });
+
+    await addWorkDependency(root, first.id, second.id);
+    await expect(
+      addWorkDependency(root, first.id, second.id),
+    ).rejects.toMatchObject({ code: "AIO-DEPENDENCY-DUPLICATE" });
+    await expect(
+      addWorkDependency(root, second.id, first.id),
+    ).rejects.toMatchObject({ code: "AIO-DEPENDENCY-CYCLE" });
+  });
+
+  test("adds normalized dependencies and preserves their order", async () => {
+    const root = await workspace();
+    const target = await createWork(root, "Dependency target");
+    const first = await createWork(root, "First prerequisite");
+    const second = await createWork(root, "Second prerequisite");
+    const recordPath = path.join(root, "work", target.id, "record.md");
+    await writeFile(
+      recordPath,
+      (await readFile(recordPath, "utf8")).replace(
+        /updated: \d{4}-\d{2}-\d{2}/,
+        "updated: 2020-01-01",
+      ),
+    );
+
+    const addedFirst = await addWorkDependency(
+      root,
+      target.id.toLowerCase(),
+      first.id.toLowerCase(),
+    );
+    await rm(path.join(root, "views", "open.md"));
+    const addedSecond = await addWorkDependency(root, target.id, second.id);
+
+    expect(addedFirst).toEqual(
+      expect.objectContaining({
+        id: target.id,
+        dependencyId: first.id,
+        action: "add",
+        changed: true,
+      }),
+    );
+    expect(addedSecond.needs).toEqual([first.id, second.id]);
+    expect(addedSecond.metadata.updated).not.toBe("2020-01-01");
+    expect(await validateWorkspace(root)).toEqual([]);
+  });
+
+  test("removes one dependency and treats an absent relation as a no-op", async () => {
+    const root = await workspace();
+    const target = await createWork(root, "Dependency target");
+    const first = await createWork(root, "First prerequisite");
+    const second = await createWork(root, "Second prerequisite");
+    await addWorkDependency(root, target.id, first.id);
+    await addWorkDependency(root, target.id, second.id);
+
+    const removed = await removeWorkDependency(root, target.id, first.id);
+    expect(removed.needs).toEqual([second.id]);
+    const paths = [
+      path.join(root, "work", target.id, "record.md"),
+      path.join(root, "views", "open.md"),
+      path.join(root, "views", "closed.md"),
+    ];
+    const beforeNoOp = await Promise.all(
+      paths.map((targetPath) => readFile(targetPath, "utf8")),
+    );
+
+    const noOp = await removeWorkDependency(root, target.id, first.id);
+
+    expect(noOp).toEqual(
+      expect.objectContaining({
+        action: "remove",
+        changed: false,
+        needs: [second.id],
+      }),
+    );
+    expect(
+      await Promise.all(
+        paths.map((targetPath) => readFile(targetPath, "utf8")),
+      ),
+    ).toEqual(beforeNoOp);
+  });
+
+  test("protects done dependencies until the work is reopened", async () => {
+    const root = await workspace();
+    const target = await createWork(root, "Completed dependent work");
+    const dependency = await createWork(root, "Completed prerequisite");
+    const extra = await createWork(root, "Extra prerequisite");
+    await addWorkDependency(root, target.id, dependency.id);
+    for (const work of [dependency, target]) {
+      await confirmWork(root, work.id, [...allChecks]);
+      await moveWork(root, work.id, "done");
+    }
+
+    await expect(
+      addWorkDependency(root, target.id, extra.id),
+    ).rejects.toMatchObject({ code: "AIO-DONE-SEALED" });
+    await expect(
+      removeWorkDependency(root, target.id, dependency.id),
+    ).rejects.toMatchObject({ code: "AIO-DONE-SEALED" });
+
+    await moveWork(root, target.id, "active", {
+      reopenReason: "Dependency assumptions changed",
+    });
+    expect(
+      (await removeWorkDependency(root, target.id, dependency.id)).changed,
+    ).toBe(true);
+    expect((await addWorkDependency(root, target.id, extra.id)).changed).toBe(
+      true,
+    );
+  });
+
+  test("allows only dependency mutations that reduce existing damage", async () => {
+    const root = await workspace();
+    const target = await createWork(root, "Damaged dependencies");
+    const other = await createWork(root, "Unrelated work");
+    await setNeeds(root, target.id, ["AIO-999", target.id]);
+
+    await expect(
+      addWorkDependency(root, target.id, other.id),
+    ).rejects.toMatchObject({ code: "AIO-WORKSPACE-INVALID" });
+    await expect(
+      removeWorkDependency(root, target.id, other.id),
+    ).rejects.toMatchObject({ code: "AIO-WORKSPACE-INVALID" });
+
+    expect(
+      (await removeWorkDependency(root, target.id, "AIO-999")).changed,
+    ).toBe(true);
+    expect(
+      new Set((await validateWorkspace(root)).map((issue) => issue.code)),
+    ).toEqual(new Set(["AIO-DEPENDENCY-SELF"]));
+    expect(
+      (await removeWorkDependency(root, target.id, target.id)).changed,
+    ).toBe(true);
+    expect(await validateWorkspace(root)).toEqual([]);
+  });
+
+  test("reopens damaged done work before repairing its dependency", async () => {
+    const root = await workspace();
+    const target = await createWork(root, "Damaged completed work");
+    await confirmWork(root, target.id, [...allChecks]);
+    await moveWork(root, target.id, "done");
+    await setNeeds(root, target.id, ["AIO-999"]);
+
+    const reopened = await moveWork(root, target.id, "active", {
+      reopenReason: "Repair an invalid dependency",
+    });
+    const repaired = await removeWorkDependency(root, target.id, "AIO-999");
+
+    expect(reopened.metadata.status).toBe("active");
+    expect(repaired.needs).toEqual([]);
+    expect(await validateWorkspace(root)).toEqual([]);
+  });
+
+  test("rolls back dependency changes when Record or View writes fail", async () => {
+    const root = await workspace();
+    const target = await createWork(root, "Rollback dependency target");
+    const dependency = await createWork(root, "Rollback prerequisite");
+    const recordPath = path.join(root, "work", target.id, "record.md");
+    const openPath = path.join(root, "views", "open.md");
+    const closedPath = path.join(root, "views", "closed.md");
+    const paths = [recordPath, openPath, closedPath];
+    const before = await Promise.all(
+      paths.map((targetPath) => readFile(targetPath, "utf8")),
+    );
+
+    for (const failureTarget of [recordPath, closedPath]) {
+      writeFailure.target = failureTarget;
+      await expect(
+        addWorkDependency(root, target.id, dependency.id),
+      ).rejects.toMatchObject({ code: "AIO-WRITE" });
+      expect(
+        await Promise.all(
+          paths.map((targetPath) => readFile(targetPath, "utf8")),
+        ),
+      ).toEqual(before);
+    }
   });
 
   test("requires completed dependencies only before done", async () => {

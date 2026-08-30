@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -71,6 +71,158 @@ describe("CLI", () => {
     ]) {
       expect(help.stdout).toContain(option);
     }
+  });
+
+  test("documents nested dependency commands", async () => {
+    const help = await cli(["work", "needs", "--help"]);
+    const addHelp = await cli(["work", "needs", "add", "--help"]);
+    const removeHelp = await cli(["work", "needs", "remove", "--help"]);
+
+    expect(help.stdout).toContain("add");
+    expect(help.stdout).toContain("remove");
+    expect(addHelp.stdout).toContain("<id> <dependency-id>");
+    expect(removeHelp.stdout).toContain("<id> <dependency-id>");
+  });
+
+  test("adds, removes, and safely repeats dependency commands", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    await cli(["--root", root, "work", "new", "Dependent work"]);
+    await cli(["--root", root, "work", "new", "Prerequisite work"]);
+
+    const added = await cli([
+      "--root",
+      root,
+      "work",
+      "needs",
+      "add",
+      "aio-001",
+      "aio-002",
+    ]);
+    expect(added.stdout).toBe("Dependency added: AIO-001 needs AIO-002\n");
+    const removed = await cli([
+      "--root",
+      root,
+      "work",
+      "needs",
+      "remove",
+      "AIO-001",
+      "AIO-002",
+    ]);
+    expect(removed.stdout).toBe(
+      "Dependency removed: AIO-001 no longer needs AIO-002\n",
+    );
+
+    const paths = [
+      path.join(root, "work", "AIO-001", "record.md"),
+      path.join(root, "views", "open.md"),
+      path.join(root, "views", "closed.md"),
+    ];
+    const beforeNoOp = await Promise.all(
+      paths.map((target) => readFile(target, "utf8")),
+    );
+    const noOp = await cli([
+      "--root",
+      root,
+      "work",
+      "needs",
+      "remove",
+      "AIO-001",
+      "AIO-002",
+    ]);
+
+    expect(noOp.stdout).toContain("Dependency unchanged");
+    expect(noOp.stdout).toContain("No changes made");
+    expect(
+      await Promise.all(paths.map((target) => readFile(target, "utf8"))),
+    ).toEqual(beforeNoOp);
+    expect((await cli(["--root", root, "check"])).stdout).toBe(
+      "Check passed\n",
+    );
+  });
+
+  test("reports dependency validation failures with exit code 2", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    await cli(["--root", root, "work", "new", "Dependent work"]);
+    await cli(["--root", root, "work", "new", "Prerequisite work"]);
+
+    for (const [args, code] of [
+      [["AIO-999", "AIO-002"], "AIO-WORK-NOT-FOUND"],
+      [["AIO-001", "AIO-999"], "AIO-DEPENDENCY-MISSING"],
+      [["AIO-001", "AIO-001"], "AIO-DEPENDENCY-SELF"],
+    ] as const) {
+      await expect(
+        cli(["--root", root, "work", "needs", "add", ...args]),
+      ).rejects.toMatchObject({
+        code: 2,
+        stderr: expect.stringContaining(code),
+      });
+    }
+
+    await cli(["--root", root, "work", "needs", "add", "AIO-001", "AIO-002"]);
+    await expect(
+      cli(["--root", root, "work", "needs", "add", "AIO-001", "AIO-002"]),
+    ).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining("AIO-DEPENDENCY-DUPLICATE"),
+    });
+    await expect(
+      cli(["--root", root, "work", "needs", "add", "AIO-002", "AIO-001"]),
+    ).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining("AIO-DEPENDENCY-CYCLE"),
+    });
+
+    const checks = [
+      "scope",
+      "completion",
+      "verification",
+      "outcome",
+      "knowledge",
+    ];
+    for (const id of ["AIO-002", "AIO-001"]) {
+      await cli(["--root", root, "work", "confirm", id, ...checks]);
+      await cli(["--root", root, "work", "move", id, "done"]);
+    }
+    await expect(
+      cli(["--root", root, "work", "needs", "remove", "AIO-001", "AIO-002"]),
+    ).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining("AIO-DONE-SEALED"),
+    });
+  });
+
+  test("rolls back built CLI dependency changes after a View write failure", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    await cli(["--root", root, "work", "new", "Dependent work"]);
+    await cli(["--root", root, "work", "new", "Prerequisite work"]);
+    const paths = [
+      path.join(root, "work", "AIO-001", "record.md"),
+      path.join(root, "views", "open.md"),
+      path.join(root, "views", "closed.md"),
+    ];
+    const before = await Promise.all(
+      paths.map((target) => readFile(target, "utf8")),
+    );
+    const viewsDirectory = path.join(root, "views");
+
+    await chmod(viewsDirectory, 0o555);
+    try {
+      await expect(
+        cli(["--root", root, "work", "needs", "add", "AIO-001", "AIO-002"]),
+      ).rejects.toMatchObject({
+        code: 2,
+        stderr: expect.stringContaining("AIO-WRITE"),
+      });
+    } finally {
+      await chmod(viewsDirectory, 0o755);
+    }
+
+    expect(
+      await Promise.all(paths.map((target) => readFile(target, "utf8"))),
+    ).toEqual(before);
   });
 
   test("returns structured dry-run questions without writing", async () => {
@@ -251,6 +403,20 @@ describe("CLI", () => {
       "--dry-run",
     ]);
     expect(preview.stdout).toContain("No changes made");
+
+    const discarded = await cli([
+      "--root",
+      root,
+      "work",
+      "discard",
+      "AIO-001",
+      "--confirm",
+      "AIO-001",
+    ]);
+    expect(discarded.stdout).toContain("Discarded: AIO-001");
+    expect(discarded.stdout).toContain(
+      "Recovery location: .aiongside/trash/AIO-001-",
+    );
   });
 
   test("reports View drift without writing and rebuilds explicitly", async () => {

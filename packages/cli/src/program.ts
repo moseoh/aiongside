@@ -1,5 +1,6 @@
 import path from "node:path";
 import {
+  addWorkDependency,
   cancelWork,
   confirmWork,
   createWork,
@@ -12,6 +13,7 @@ import {
   previewDiscard,
   previewMoveWork,
   rebuildViews,
+  removeWorkDependency,
   validateWorkspace,
   WorkspaceError,
 } from "@aiongside/filesystem";
@@ -76,6 +78,42 @@ export function createProgram(): Command {
       : await moveWork(root, id, status.toLowerCase(), moveOptions);
     writeMoveResult(result, options);
   });
+
+  const needs = work
+    .command("needs")
+    .description("Manage work item dependencies");
+
+  needs
+    .command("add")
+    .description("Add one dependency to a work item")
+    .argument("<id>", "Work item ID")
+    .argument("<dependency-id>", "Dependency work item ID")
+    .action(async (id: string, dependencyId: string) => {
+      const root = await commandRoot(program);
+      const result = await addWorkDependency(root, id, dependencyId);
+      process.stdout.write(
+        `Dependency added: ${result.id} needs ${result.dependencyId}\n`,
+      );
+    });
+
+  needs
+    .command("remove")
+    .description("Remove one dependency from a work item")
+    .argument("<id>", "Work item ID")
+    .argument("<dependency-id>", "Dependency work item ID")
+    .action(async (id: string, dependencyId: string) => {
+      const root = await commandRoot(program);
+      const result = await removeWorkDependency(root, id, dependencyId);
+      if (!result.changed) {
+        process.stdout.write(
+          `Dependency unchanged: ${result.id} does not need ${result.dependencyId}\nNo changes made.\n`,
+        );
+        return;
+      }
+      process.stdout.write(
+        `Dependency removed: ${result.id} no longer needs ${result.dependencyId}\n`,
+      );
+    });
 
   work
     .command("confirm")

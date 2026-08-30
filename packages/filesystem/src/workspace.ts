@@ -43,6 +43,12 @@ const RECORD_NAME = "record.md";
 const AGENT_MARKER = ".aiongside/rules.md";
 const TEMPLATE_DIR = path.join(".aiongside", "templates");
 const VIEW_PATHS = ["views/open.md", "views/closed.md"] as const;
+const DEPENDENCY_RELATION_CODES = new Set([
+  "AIO-DEPENDENCY-MISSING",
+  "AIO-DEPENDENCY-SELF",
+  "AIO-DEPENDENCY-DUPLICATE",
+  "AIO-DEPENDENCY-CYCLE",
+]);
 
 export interface LoadedWork {
   directory: string;
@@ -60,6 +66,15 @@ export interface DiscardPreview {
 export interface MoveWorkOptions extends TransitionInputValues {}
 
 export interface MoveWorkResult extends TransitionResult {
+  metadata: WorkMetadata;
+}
+
+export interface DependencyMutationResult {
+  id: string;
+  dependencyId: string;
+  action: "add" | "remove";
+  changed: boolean;
+  needs: string[];
   metadata: WorkMetadata;
 }
 
@@ -292,11 +307,15 @@ export async function moveWork(
     );
   }
   return withWorkspaceLock(root, async () => {
-    await assertMutationSafe(root, [
-      "AIO-STATE-GATE",
-      "AIO-DEPENDENCY-BLOCKED",
-      "AIO-DONE-INVALIDATED",
-    ]);
+    const normalizedId = id.trim().toUpperCase();
+    await assertMutationSafe(
+      root,
+      ["AIO-STATE-GATE", "AIO-DEPENDENCY-BLOCKED", "AIO-DONE-INVALIDATED"],
+      (issue) =>
+        targetStatus !== "done" &&
+        DEPENDENCY_RELATION_CODES.has(issue.code) &&
+        issueTouchesWork(issue, normalizedId),
+    );
     const context = await loadMoveContext(root, id);
     const preview = buildMoveResult(
       context.works,
@@ -495,6 +514,142 @@ export async function cancelWork(
   options: MoveWorkOptions = {},
 ): Promise<MoveWorkResult> {
   return moveWork(root, id, "cancelled", options);
+}
+
+export async function addWorkDependency(
+  root: string,
+  id: string,
+  dependencyId: string,
+): Promise<DependencyMutationResult> {
+  return withWorkspaceLock(root, async () => {
+    await assertMutationSafe(root);
+    const normalizedId = id.trim().toUpperCase();
+    const normalizedDependencyId = dependencyId.trim().toUpperCase();
+    const works = await listWorks(root);
+    const loaded = requireWork(works, normalizedId);
+    const dependency = works.find(
+      (work) => work.metadata.id === normalizedDependencyId,
+    );
+    if (!dependency) {
+      throw new WorkspaceError(
+        `Dependency does not exist: ${normalizedDependencyId}`,
+        "AIO-DEPENDENCY-MISSING",
+      );
+    }
+    assertDependencyMutable(loaded.metadata);
+    if (normalizedId === normalizedDependencyId) {
+      throw new WorkspaceError(
+        "A work item cannot depend on itself.",
+        "AIO-DEPENDENCY-SELF",
+      );
+    }
+    if (loaded.metadata.needs.includes(normalizedDependencyId)) {
+      throw new WorkspaceError(
+        `Duplicate dependency: ${normalizedDependencyId}`,
+        "AIO-DEPENDENCY-DUPLICATE",
+      );
+    }
+
+    const record = workMetadataSchema.parse({
+      ...loaded.metadata,
+      updated: isoToday(),
+      needs: [...loaded.metadata.needs, normalizedDependencyId],
+    });
+    const nextMetadata = replaceWorkMetadata(works, record);
+    const issue = validateDependencies(nextMetadata)[0];
+    if (issue) {
+      throw new WorkspaceError(issue.message, issue.code);
+    }
+    await writeDependencyMutation(root, works, loaded, record);
+    return {
+      id: normalizedId,
+      dependencyId: normalizedDependencyId,
+      action: "add",
+      changed: true,
+      needs: [...record.needs],
+      metadata: record,
+    };
+  });
+}
+
+export async function removeWorkDependency(
+  root: string,
+  id: string,
+  dependencyId: string,
+): Promise<DependencyMutationResult> {
+  return withWorkspaceLock(root, async () => {
+    const normalizedId = id.trim().toUpperCase();
+    const normalizedDependencyId = dependencyId.trim().toUpperCase();
+    const workspaceIssues = await validateWorkspace(root);
+    const blocking = workspaceIssues.find(
+      (issue) =>
+        issue.code !== "AIO-STRUCTURE-VIEW" &&
+        issue.code !== "AIO-VIEW-DRIFT" &&
+        !DEPENDENCY_RELATION_CODES.has(issue.code),
+    );
+    if (blocking) {
+      throw workspaceInvalidError(blocking);
+    }
+
+    const works = await listWorks(root);
+    const loaded = requireWork(works, normalizedId);
+    assertDependencyMutable(loaded.metadata);
+    const beforeDependencyIssues = validateDependencies(
+      works.map((work) => work.metadata),
+    );
+    if (!loaded.metadata.needs.includes(normalizedDependencyId)) {
+      const existingIssue = beforeDependencyIssues[0];
+      if (existingIssue) {
+        throw workspaceInvalidError(existingIssue);
+      }
+      return {
+        id: normalizedId,
+        dependencyId: normalizedDependencyId,
+        action: "remove",
+        changed: false,
+        needs: [...loaded.metadata.needs],
+        metadata: loaded.metadata,
+      };
+    }
+
+    const record = workMetadataSchema.parse({
+      ...loaded.metadata,
+      updated: isoToday(),
+      needs: loaded.metadata.needs.filter(
+        (dependency) => dependency !== normalizedDependencyId,
+      ),
+    });
+    const nextMetadata = replaceWorkMetadata(works, record);
+    const afterDependencyIssues = validateDependencies(nextMetadata);
+    if (
+      beforeDependencyIssues.length > 0 &&
+      !isDependencyRepair(beforeDependencyIssues, afterDependencyIssues)
+    ) {
+      const existingIssue = beforeDependencyIssues[0];
+      if (existingIssue) {
+        throw workspaceInvalidError(existingIssue);
+      }
+    }
+    if (
+      beforeDependencyIssues.length === 0 &&
+      afterDependencyIssues.length > 0
+    ) {
+      const issue = afterDependencyIssues[0];
+      if (issue) {
+        throw new WorkspaceError(issue.message, issue.code);
+      }
+    }
+
+    await writeDependencyMutation(root, works, loaded, record);
+    return {
+      id: normalizedId,
+      dependencyId: normalizedDependencyId,
+      action: "remove",
+      changed: true,
+      needs: [...record.needs],
+      metadata: record,
+    };
+  });
 }
 
 export async function previewDiscard(
@@ -1012,6 +1167,74 @@ async function updateWork(
   });
 }
 
+function requireWork(works: LoadedWork[], id: string): LoadedWork {
+  const loaded = works.find((work) => work.metadata.id === id);
+  if (!loaded) {
+    throw new WorkspaceError(
+      `Cannot find work item: ${id}`,
+      "AIO-WORK-NOT-FOUND",
+    );
+  }
+  return loaded;
+}
+
+function assertDependencyMutable(metadata: WorkMetadata): void {
+  if (metadata.status === "done") {
+    throw new WorkspaceError(
+      `Reopen ${metadata.id} before changing dependencies.`,
+      "AIO-DONE-SEALED",
+    );
+  }
+}
+
+function replaceWorkMetadata(
+  works: LoadedWork[],
+  record: WorkMetadata,
+): WorkMetadata[] {
+  return works.map((work) =>
+    work.metadata.id === record.id ? record : work.metadata,
+  );
+}
+
+function isDependencyRepair(
+  before: ValidationIssue[],
+  after: ValidationIssue[],
+): boolean {
+  if (after.length >= before.length) {
+    return false;
+  }
+  const existing = new Set(before.map(dependencyIssueKey));
+  return after.every((issue) => existing.has(dependencyIssueKey(issue)));
+}
+
+function dependencyIssueKey(issue: ValidationIssue): string {
+  return `${issue.code}\0${issue.message}`;
+}
+
+async function writeDependencyMutation(
+  root: string,
+  works: LoadedWork[],
+  loaded: LoadedWork,
+  record: WorkMetadata,
+): Promise<void> {
+  const document = parseMarkdownDocument(loaded.source);
+  const recordPath = path.join(root, WORK_DIR, record.id, RECORD_NAME);
+  try {
+    await atomicWrite(
+      recordPath,
+      formatMarkdownDocument(record, document.body),
+    );
+    await writeViews(root, replaceWorkMetadata(works, record));
+  } catch (error) {
+    await atomicWrite(recordPath, loaded.source);
+    await writeViews(
+      root,
+      works.map((work) => work.metadata),
+    );
+    throw error;
+  }
+}
+
 function validateDependencies(metadata: WorkMetadata[]): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const byId = new Map(metadata.map((item) => [item.id, item]));
@@ -1344,6 +1567,7 @@ async function withWorkspaceLock<T>(
 async function assertMutationSafe(
   root: string,
   allowedCodes: readonly string[] = [],
+  allowedIssue?: (issue: ValidationIssue) => boolean,
 ): Promise<void> {
   const allowed = new Set([
     "AIO-STRUCTURE-VIEW",
@@ -1351,15 +1575,24 @@ async function assertMutationSafe(
     ...allowedCodes,
   ]);
   const blocking = (await validateWorkspace(root)).filter(
-    (issue) => !allowed.has(issue.code),
+    (issue) => !allowed.has(issue.code) && !allowedIssue?.(issue),
   );
   const first = blocking[0];
   if (first) {
-    throw new WorkspaceError(
-      `Fix workspace validation first. [${first.code}] ${first.path}: ${first.message}`,
-      "AIO-WORKSPACE-INVALID",
-    );
+    throw workspaceInvalidError(first);
   }
+}
+
+function issueTouchesWork(issue: ValidationIssue, id: string): boolean {
+  const recordPath = `${WORK_DIR}/${id}/${RECORD_NAME}`;
+  return issue.path.startsWith(recordPath) || issue.message.includes(id);
+}
+
+function workspaceInvalidError(issue: ValidationIssue): WorkspaceError {
+  return new WorkspaceError(
+    `Fix workspace validation first. [${issue.code}] ${issue.path}: ${issue.message}`,
+    "AIO-WORKSPACE-INVALID",
+  );
 }
 
 async function nextWorkNumber(root: string, prefix: string): Promise<number> {
