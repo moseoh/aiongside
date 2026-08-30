@@ -17,6 +17,8 @@ export const TEMPLATE_DEFINITIONS: Record<TemplateName, TemplateDefinition> = {
     requiredPlaceholders: ["title"],
     contents: `# {{title}}
 
+Machine-owned status, transition history, and completion seals are stored in frontmatter. Keep the work narrative below.
+
 ## Context
 
 Describe the confirmed context.
@@ -145,11 +147,12 @@ export function createRulesDocument(): string {
 
 1. Read the relevant \`work/<ID>/record.md\` before starting work.
 2. Create a work item with \`aiongside work new\`.
-3. Change status with \`aiongside work move\`.
-4. Confirm completed checks with \`aiongside work confirm\`.
-5. Preserve cancelled work items with \`aiongside work cancel\`.
-6. Run \`aiongside work discard <ID> --dry-run\` before discarding a work item.
-7. Run \`aiongside check\` before finishing work.
+3. Preview every status change with \`aiongside work move <ID> <status> --dry-run --json\`.
+4. Ask the user for every input listed in \`missingInputs\` and pass each answer through its explicit CLI option.
+5. Confirm completed checks with \`aiongside work confirm\` before moving to \`done\`.
+6. Apply the status change with \`aiongside work move\`; use \`work cancel\` only as a cancellation alias.
+7. Run \`aiongside work discard <ID> --dry-run\` before discarding a work item.
+8. Run \`aiongside check\` before finishing work.
 `;
 }
 

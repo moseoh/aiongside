@@ -2,22 +2,13 @@ import { z } from "zod";
 
 export const WORK_STATUSES = [
   "inbox",
-  "ready",
   "active",
-  "verify",
   "waiting",
   "done",
   "cancelled",
 ] as const;
 
-export const MOVABLE_STATUSES = [
-  "inbox",
-  "ready",
-  "active",
-  "verify",
-  "waiting",
-  "done",
-] as const;
+export const MOVABLE_STATUSES = WORK_STATUSES;
 
 export const WORK_TYPES = [
   "delivery",
@@ -48,6 +39,8 @@ const isoDate = z
     { message: "Must be a valid date" },
   );
 
+const isoTimestamp = z.string().datetime({ offset: true });
+
 export const workspaceConfigSchema = z.object({
   schema: z.literal(1),
   name: z.string().trim().min(1),
@@ -60,6 +53,23 @@ export const workChecksSchema = z.object({
   verification: z.boolean(),
   outcome: z.boolean(),
   knowledge: z.boolean(),
+});
+
+export const workTransitionSchema = z.object({
+  at: isoTimestamp,
+  from: z.enum(WORK_STATUSES),
+  to: z.enum(WORK_STATUSES),
+  reopenReason: z.string().trim().min(1).optional(),
+  waitingReason: z.string().trim().min(1).optional(),
+  resumeWhen: z.string().trim().min(1).optional(),
+  waitingResolution: z.string().trim().min(1).optional(),
+  cancellationReason: z.string().trim().min(1).optional(),
+  completionInvalidated: z.boolean().optional(),
+});
+
+export const completionSealSchema = z.object({
+  completedAt: isoTimestamp,
+  digest: z.string().regex(/^[a-f0-9]{64}$/),
 });
 
 export const workMetadataSchema = z.object({
@@ -78,6 +88,8 @@ export const workMetadataSchema = z.object({
   updated: isoDate,
   needs: z.array(z.string().regex(/^[A-Z][A-Z0-9]{1,7}-\d{3,}$/)).default([]),
   checks: workChecksSchema,
+  transitions: z.array(workTransitionSchema).default([]),
+  completionSeal: completionSealSchema.nullable().default(null),
 });
 
 export const overviewMetadataSchema = z.object({
@@ -92,6 +104,8 @@ export type WorkStatus = WorkMetadata["status"];
 export type MovableStatus = (typeof MOVABLE_STATUSES)[number];
 export type WorkType = WorkMetadata["type"];
 export type WorkCheck = (typeof WORK_CHECKS)[number];
+export type WorkTransition = z.infer<typeof workTransitionSchema>;
+export type CompletionSeal = z.infer<typeof completionSealSchema>;
 
 export interface ValidationIssue {
   code: string;

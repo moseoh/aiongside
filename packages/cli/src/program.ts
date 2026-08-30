@@ -6,8 +6,11 @@ import {
   discardWork,
   findWorkspaceRoot,
   initializeWorkspace,
+  type MoveWorkOptions,
+  type MoveWorkResult,
   moveWork,
   previewDiscard,
+  previewMoveWork,
   rebuildViews,
   validateWorkspace,
   WorkspaceError,
@@ -59,16 +62,20 @@ export function createProgram(): Command {
       );
     });
 
-  work
-    .command("move")
-    .description("Move a work item to another status")
-    .argument("<id>", "Work item ID")
-    .argument("<status>", "Target status")
-    .action(async (id: string, status: string) => {
-      const root = await commandRoot(program);
-      const metadata = await moveWork(root, id, status.toLowerCase());
-      process.stdout.write(`Moved: ${metadata.id} -> ${metadata.status}\n`);
-    });
+  addTransitionOptions(
+    work
+      .command("move")
+      .description("Move a work item to another status")
+      .argument("<id>", "Work item ID")
+      .argument("<status>", "Target status"),
+  ).action(async (id: string, status: string, options: MoveCliOptions) => {
+    const root = await commandRoot(program);
+    const moveOptions = toMoveOptions(options);
+    const result = options.dryRun
+      ? await previewMoveWork(root, id, status.toLowerCase(), moveOptions)
+      : await moveWork(root, id, status.toLowerCase(), moveOptions);
+    writeMoveResult(result, options);
+  });
 
   work
     .command("confirm")
@@ -86,15 +93,19 @@ export function createProgram(): Command {
       );
     });
 
-  work
-    .command("cancel")
-    .description("Cancel a work item and preserve its history")
-    .argument("<id>", "Work item ID")
-    .action(async (id: string) => {
-      const root = await commandRoot(program);
-      const metadata = await cancelWork(root, id);
-      process.stdout.write(`Cancelled: ${metadata.id}\nHistory preserved.\n`);
-    });
+  addTransitionOptions(
+    work
+      .command("cancel")
+      .description("Cancel a work item and preserve its history")
+      .argument("<id>", "Work item ID"),
+  ).action(async (id: string, options: MoveCliOptions) => {
+    const root = await commandRoot(program);
+    const moveOptions = toMoveOptions(options);
+    const result = options.dryRun
+      ? await previewMoveWork(root, id, "cancelled", moveOptions)
+      : await cancelWork(root, id, moveOptions);
+    writeMoveResult(result, options);
+  });
 
   work
     .command("discard")
@@ -173,6 +184,99 @@ export function createProgram(): Command {
     });
 
   return program;
+}
+
+interface MoveCliOptions {
+  dryRun?: boolean;
+  json?: boolean;
+  reopenReason?: string;
+  waitingReason?: string;
+  resumeWhen?: string;
+  waitingResolution?: string;
+  cancellationReason?: string;
+}
+
+function addTransitionOptions(command: Command): Command {
+  return command
+    .option(
+      "--dry-run",
+      "Show transition questions and effects without writing",
+    )
+    .option("--json", "Print a structured transition result")
+    .option(
+      "--reopen-reason <text>",
+      "Reason for reopening or correcting closed work",
+    )
+    .option("--waiting-reason <text>", "Reason the work is waiting")
+    .option(
+      "--resume-when <text>",
+      "Condition that allows waiting work to resume",
+    )
+    .option("--waiting-resolution <text>", "Reason the wait ended")
+    .option("--cancellation-reason <text>", "Reason the work is cancelled");
+}
+
+function toMoveOptions(options: MoveCliOptions): MoveWorkOptions {
+  return {
+    ...(options.reopenReason ? { reopenReason: options.reopenReason } : {}),
+    ...(options.waitingReason ? { waitingReason: options.waitingReason } : {}),
+    ...(options.resumeWhen ? { resumeWhen: options.resumeWhen } : {}),
+    ...(options.waitingResolution
+      ? { waitingResolution: options.waitingResolution }
+      : {}),
+    ...(options.cancellationReason
+      ? { cancellationReason: options.cancellationReason }
+      : {}),
+  };
+}
+
+function writeMoveResult(
+  result: MoveWorkResult,
+  options: MoveCliOptions,
+): void {
+  const output = {
+    id: result.id,
+    from: result.from,
+    to: result.to,
+    requirements: result.requirements,
+    requiredInputs: result.requiredInputs,
+    missingInputs: result.missingInputs,
+    warnings: result.warnings,
+    changes: result.changes,
+    invalidatesCompletion: result.invalidatesCompletion,
+    canMove: result.canMove,
+    applied: result.applied,
+  };
+  if (options.json) {
+    process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+    return;
+  }
+
+  process.stdout.write(
+    `${options.dryRun ? "Move preview" : "Moved"}: ${result.id} ${result.from} -> ${result.to}\n`,
+  );
+  if (result.missingInputs.length > 0) {
+    process.stdout.write("Questions:\n");
+    for (const input of result.missingInputs) {
+      const option = input.option ? `${input.option}: ` : "";
+      process.stdout.write(`- ${option}${input.question}\n`);
+    }
+  }
+  if (result.changes.length > 0) {
+    process.stdout.write("Changes:\n");
+    for (const change of result.changes) {
+      process.stdout.write(`- ${change}\n`);
+    }
+  }
+  if (result.warnings.length > 0) {
+    process.stdout.write("Warnings:\n");
+    for (const warning of result.warnings) {
+      process.stdout.write(`- ${warning}\n`);
+    }
+  }
+  if (options.dryRun) {
+    process.stdout.write("No changes made.\n");
+  }
 }
 
 export async function run(argv = process.argv): Promise<void> {

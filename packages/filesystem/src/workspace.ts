@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Dirent } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
@@ -8,6 +8,7 @@ import {
   createPlanDocument,
   createRecordDocument,
   createRulesDocument,
+  evaluateTransition,
   formatMarkdownDocument,
   idNumber,
   isMovableStatus,
@@ -18,10 +19,14 @@ import {
   TEMPLATE_DEFINITIONS,
   TEMPLATE_NAMES,
   type TemplateName,
+  type TransitionInputValues,
+  type TransitionRequiredInput,
+  type TransitionResult,
   type ValidationIssue,
   validateTemplate,
   type WorkCheck,
   type WorkMetadata,
+  type WorkStatus,
   type WorkspaceConfig,
   workMetadataSchema,
   workspaceConfigSchema,
@@ -50,6 +55,12 @@ export interface DiscardPreview {
   files: string[];
   referencedBy: string[];
   trashTarget: string;
+}
+
+export interface MoveWorkOptions extends TransitionInputValues {}
+
+export interface MoveWorkResult extends TransitionResult {
+  metadata: WorkMetadata;
 }
 
 export async function pathExists(target: string): Promise<boolean> {
@@ -272,29 +283,183 @@ export async function moveWork(
   root: string,
   id: string,
   targetStatus: string,
-): Promise<WorkMetadata> {
+  options: MoveWorkOptions = {},
+): Promise<MoveWorkResult> {
   if (!isMovableStatus(targetStatus)) {
     throw new WorkspaceError(
-      targetStatus === "cancelled"
-        ? "Use `aiongside work cancel <id>` to cancel a work item."
-        : `Cannot move work item to status: ${targetStatus}`,
+      `Cannot move work item to status: ${targetStatus}`,
       "AIO-WORK-STATUS",
     );
   }
-  return updateWork(
-    root,
-    id,
-    (metadata) => {
-      if (metadata.status === "cancelled") {
+  return withWorkspaceLock(root, async () => {
+    await assertMutationSafe(root, [
+      "AIO-STATE-GATE",
+      "AIO-DEPENDENCY-BLOCKED",
+      "AIO-DONE-INVALIDATED",
+    ]);
+    const context = await loadMoveContext(root, id);
+    const preview = buildMoveResult(
+      context.works,
+      context.loaded,
+      targetStatus,
+      options,
+    );
+    const legacySealMigration =
+      preview.from === "done" &&
+      preview.to === "done" &&
+      preview.metadata.completionSeal === null;
+    if (preview.missingInputs.length > 0) {
+      const missing = preview.missingInputs[0];
+      if (!missing) {
         throw new WorkspaceError(
-          "Cancelled work items cannot be moved.",
-          "AIO-WORK-TERMINAL",
+          "Transition requirements are incomplete.",
+          "AIO-TRANSITION-INPUT",
         );
       }
-      return { ...metadata, status: targetStatus };
-    },
-    { enforceState: true },
-  );
+      throw new WorkspaceError(
+        `${missing.question}${missing.hint ? ` ${missing.hint}` : ""}`,
+        missing.code,
+      );
+    }
+    if (preview.from === preview.to && !legacySealMigration) {
+      return preview;
+    }
+
+    const timestamp = new Date().toISOString();
+    const document = parseMarkdownDocument(context.loaded.source);
+    const transition =
+      preview.from === preview.to
+        ? undefined
+        : {
+            at: timestamp,
+            from: preview.from,
+            to: preview.to,
+            ...(options.reopenReason
+              ? { reopenReason: options.reopenReason.trim() }
+              : {}),
+            ...(options.waitingReason
+              ? { waitingReason: options.waitingReason.trim() }
+              : {}),
+            ...(options.resumeWhen
+              ? { resumeWhen: options.resumeWhen.trim() }
+              : {}),
+            ...(options.waitingResolution
+              ? { waitingResolution: options.waitingResolution.trim() }
+              : {}),
+            ...(options.cancellationReason
+              ? { cancellationReason: options.cancellationReason.trim() }
+              : {}),
+            ...(preview.invalidatesCompletion
+              ? { completionInvalidated: true }
+              : {}),
+          };
+    let record = workMetadataSchema.parse({
+      ...context.loaded.metadata,
+      status: targetStatus,
+      updated: legacySealMigration
+        ? context.loaded.metadata.updated
+        : isoToday(),
+      checks: preview.invalidatesCompletion
+        ? {
+            ...context.loaded.metadata.checks,
+            verification: false,
+            outcome: false,
+            knowledge: false,
+          }
+        : context.loaded.metadata.checks,
+      transitions: transition
+        ? [...context.loaded.metadata.transitions, transition]
+        : context.loaded.metadata.transitions,
+      completionSeal: preview.invalidatesCompletion
+        ? null
+        : context.loaded.metadata.completionSeal,
+    });
+    if (targetStatus === "done") {
+      record = workMetadataSchema.parse({
+        ...record,
+        completionSeal: {
+          completedAt: timestamp,
+          digest: await calculateCompletionDigest(
+            root,
+            context.loaded.metadata.id,
+            record,
+            document.body,
+          ),
+        },
+      });
+    }
+
+    const recordPath = path.join(
+      root,
+      WORK_DIR,
+      context.loaded.metadata.id,
+      RECORD_NAME,
+    );
+    const planPath = path.join(
+      root,
+      WORK_DIR,
+      context.loaded.metadata.id,
+      "plan.md",
+    );
+    const previousPlan = await readOptionalFile(planPath);
+    try {
+      await atomicWrite(
+        recordPath,
+        formatMarkdownDocument(record, document.body),
+      );
+      if (record.status === "active" && previousPlan === undefined) {
+        const planTemplate = await readWorkspaceTemplate(root, "plan");
+        await atomicWrite(
+          planPath,
+          createPlanDocument(planTemplate, record.title),
+        );
+      }
+      await writeViews(
+        root,
+        context.works.map((work) =>
+          work.metadata.id === record.id ? record : work.metadata,
+        ),
+      );
+    } catch (error) {
+      await atomicWrite(recordPath, context.loaded.source);
+      if (previousPlan === undefined) {
+        await rm(planPath, { force: true });
+      } else {
+        await atomicWrite(planPath, previousPlan);
+      }
+      await writeViews(
+        root,
+        context.works.map((work) => work.metadata),
+      );
+      throw error;
+    }
+
+    return {
+      ...preview,
+      changes: legacySealMigration
+        ? ["Create the initial completion seal."]
+        : preview.changes,
+      canMove: true,
+      applied: true,
+      metadata: record,
+    };
+  });
+}
+
+export async function previewMoveWork(
+  root: string,
+  id: string,
+  targetStatus: string,
+  options: MoveWorkOptions = {},
+): Promise<MoveWorkResult> {
+  if (!isMovableStatus(targetStatus)) {
+    throw new WorkspaceError(
+      `Cannot move work item to status: ${targetStatus}`,
+      "AIO-WORK-STATUS",
+    );
+  }
+  const context = await loadMoveContext(root, id);
+  return buildMoveResult(context.works, context.loaded, targetStatus, options);
 }
 
 export async function confirmWork(
@@ -327,16 +492,9 @@ export async function confirmWork(
 export async function cancelWork(
   root: string,
   id: string,
-): Promise<WorkMetadata> {
-  return updateWork(root, id, (metadata) => {
-    if (metadata.status === "done") {
-      throw new WorkspaceError(
-        "Completed work items cannot be cancelled.",
-        "AIO-WORK-TERMINAL",
-      );
-    }
-    return { ...metadata, status: "cancelled" };
-  });
+  options: MoveWorkOptions = {},
+): Promise<MoveWorkResult> {
+  return moveWork(root, id, "cancelled", options);
 }
 
 export async function previewDiscard(
@@ -447,6 +605,7 @@ export async function validateWorkspace(
 
   const seen = new Set<string>();
   const viewMetadata: WorkMetadata[] = [];
+  const loadedRecords: LoadedWork[] = [];
   let canCompareViews = true;
   let canValidateRelations = true;
   for (const entry of entries) {
@@ -498,6 +657,11 @@ export async function validateWorkspace(
     }
     const metadata = result.data;
     viewMetadata.push(metadata);
+    loadedRecords.push({
+      directory: entry.name,
+      metadata,
+      source: formatMarkdownDocument(metadata, document.body),
+    });
     if (hasOverview) {
       issues.push(...(await validateOverview(root, overviewPath, metadata)));
     }
@@ -533,9 +697,239 @@ export async function validateWorkspace(
     for (const metadata of viewMetadata) {
       issues.push(...validateWorkState(metadata, byId));
     }
+    for (const loaded of loadedRecords) {
+      if (loaded.metadata.status !== "done") {
+        continue;
+      }
+      if (loaded.metadata.completionSeal === null) {
+        issues.push({
+          code: "AIO-DONE-INVALIDATED",
+          path: workFieldPath(loaded.metadata.id, "completionSeal"),
+          message: "Done work is missing a completion seal.",
+          hint: `Run \`aiongside work move ${loaded.metadata.id} done\` to create the initial seal after reviewing the work.`,
+        });
+        continue;
+      }
+      const document = parseMarkdownDocument(loaded.source);
+      const digest = await calculateCompletionDigest(
+        root,
+        loaded.metadata.id,
+        loaded.metadata,
+        document.body,
+      );
+      if (digest !== loaded.metadata.completionSeal.digest) {
+        issues.push({
+          code: "AIO-DONE-INVALIDATED",
+          path: workFieldPath(loaded.metadata.id, "completionSeal"),
+          message: "Done work changed after completion was verified.",
+          hint: `Run \`aiongside work move ${loaded.metadata.id} active --reopen-reason <reason>\` before updating and completing it again.`,
+        });
+      }
+    }
   }
   issues.push(...(await validateViews(root, viewMetadata, canCompareViews)));
   return issues;
+}
+
+async function loadMoveContext(
+  root: string,
+  id: string,
+): Promise<{ works: LoadedWork[]; loaded: LoadedWork }> {
+  const normalizedId = id.trim().toUpperCase();
+  const works = await listWorks(root);
+  const loaded = works.find((work) => work.metadata.id === normalizedId);
+  if (!loaded) {
+    throw new WorkspaceError(
+      `Cannot find work item: ${normalizedId}`,
+      "AIO-WORK-NOT-FOUND",
+    );
+  }
+  return { works, loaded };
+}
+
+function buildMoveResult(
+  works: LoadedWork[],
+  loaded: LoadedWork,
+  targetStatus: WorkStatus,
+  options: MoveWorkOptions,
+): MoveWorkResult {
+  const rule = evaluateTransition(loaded.metadata.status, targetStatus);
+  const requiredInputs: TransitionRequiredInput[] = rule.requiredInputs.map(
+    (input) => ({
+      ...input,
+      source: "option",
+      code: "AIO-TRANSITION-INPUT",
+    }),
+  );
+  const legacySealMigration =
+    loaded.metadata.status === "done" &&
+    targetStatus === "done" &&
+    loaded.metadata.completionSeal === null;
+
+  if (rule.requirements.includes("D") || legacySealMigration) {
+    const checkQuestions: Record<WorkCheck, string> = {
+      scope: "Has the current work scope been reviewed?",
+      completion: "Have the completion criteria been met?",
+      verification: "What verification was performed and what was observed?",
+      outcome: "Has the outcome been recorded?",
+      knowledge: "Has the persistent knowledge impact been reviewed?",
+    };
+    for (const check of [
+      "scope",
+      "completion",
+      "verification",
+      "outcome",
+      "knowledge",
+    ] as const) {
+      requiredInputs.push({
+        key: `checks.${check}`,
+        source: "record",
+        question: checkQuestions[check],
+        code: "AIO-STATE-GATE",
+        hint: `Run \`aiongside work confirm ${loaded.metadata.id} ${check}\` after reviewing the Record.`,
+      });
+    }
+    const byId = new Map(
+      works.map((work) => [work.metadata.id, work.metadata]),
+    );
+    for (const dependencyId of loaded.metadata.needs) {
+      const dependency = byId.get(dependencyId);
+      requiredInputs.push({
+        key: `needs.${dependencyId}`,
+        source: "record",
+        question: dependency
+          ? `Dependency ${dependencyId} is ${dependency.status}. How should it be resolved before completion?`
+          : `Dependency ${dependencyId} is missing. How should it be resolved before completion?`,
+        code: "AIO-DEPENDENCY-BLOCKED",
+        hint: "Complete the dependency, remove the relationship, or explicitly revise the work record.",
+      });
+    }
+  }
+
+  const missingInputs = requiredInputs.filter((input) => {
+    if (input.source === "option") {
+      const value = options[input.key as keyof TransitionInputValues];
+      return !value?.trim();
+    }
+    if (input.key.startsWith("checks.")) {
+      const check = input.key.slice("checks.".length) as WorkCheck;
+      return !loaded.metadata.checks[check];
+    }
+    if (input.key.startsWith("needs.")) {
+      const dependencyId = input.key.slice("needs.".length);
+      const dependency = works.find(
+        (work) => work.metadata.id === dependencyId,
+      );
+      return dependency?.metadata.status !== "done";
+    }
+    return true;
+  });
+  const dependentDone = rule.invalidatesCompletion
+    ? findDependentDoneIds(works, loaded.metadata.id)
+    : [];
+  const warnings = dependentDone.map(
+    (id) =>
+      `Completed work ${id} depends on ${loaded.metadata.id}; review whether its completion remains valid.`,
+  );
+  const changes: string[] = [];
+  if (!rule.noOp) {
+    changes.push(`Change status from ${rule.from} to ${rule.to}.`);
+    changes.push("Append a transition history entry.");
+    changes.push("Rebuild generated Views.");
+  }
+  if (targetStatus === "active" && rule.from !== "active") {
+    changes.push("Create plan.md if it does not exist.");
+  }
+  if (targetStatus === "done" && rule.from !== "done") {
+    changes.push("Create a completion seal for the current work content.");
+  }
+  if (legacySealMigration) {
+    changes.push("Create the initial completion seal.");
+  }
+  if (rule.invalidatesCompletion) {
+    changes.push("Invalidate the existing completion seal.");
+    changes.push("Reset verification, outcome, and knowledge confirmations.");
+  }
+
+  return {
+    id: loaded.metadata.id,
+    from: rule.from,
+    to: rule.to,
+    requirements: rule.requirements,
+    requiredInputs,
+    missingInputs,
+    warnings,
+    changes,
+    invalidatesCompletion: rule.invalidatesCompletion,
+    canMove: missingInputs.length === 0,
+    applied: false,
+    metadata: loaded.metadata,
+  };
+}
+
+function findDependentDoneIds(
+  works: LoadedWork[],
+  dependencyId: string,
+): string[] {
+  const affected = new Set([dependencyId]);
+  const result = new Set<string>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const work of works) {
+      if (
+        !affected.has(work.metadata.id) &&
+        work.metadata.needs.some((id) => affected.has(id))
+      ) {
+        affected.add(work.metadata.id);
+        if (work.metadata.status === "done") {
+          result.add(work.metadata.id);
+        }
+        changed = true;
+      }
+    }
+  }
+  return [...result].sort();
+}
+
+async function calculateCompletionDigest(
+  root: string,
+  id: string,
+  metadata: WorkMetadata,
+  recordBody: string,
+): Promise<string> {
+  const hash = createHash("sha256");
+  const stableMetadata = {
+    schema: metadata.schema,
+    id: metadata.id,
+    title: metadata.title,
+    type: metadata.type,
+    created: metadata.created,
+    needs: metadata.needs,
+    checks: metadata.checks,
+  };
+  hash.update("record-metadata\0");
+  hash.update(JSON.stringify(stableMetadata));
+  hash.update("\0record-body\0");
+  hash.update(normalizeCompletionText(recordBody));
+
+  const workPath = path.join(root, WORK_DIR, id);
+  const recordPath = `${WORK_DIR}/${id}/${RECORD_NAME}`;
+  const files = await listRelativeFiles(root, workPath);
+  for (const file of files.sort()) {
+    if (file === recordPath) {
+      continue;
+    }
+    hash.update(`\0${file}\0`);
+    hash.update(
+      normalizeCompletionText(await readFile(path.join(root, file), "utf8")),
+    );
+  }
+  return hash.digest("hex");
+}
+
+function normalizeCompletionText(source: string): string {
+  return `${source.replaceAll("\r\n", "\n").trimEnd()}\n`;
 }
 
 async function updateWork(
@@ -548,6 +942,7 @@ async function updateWork(
     await assertMutationSafe(root, [
       "AIO-STATE-GATE",
       "AIO-DEPENDENCY-BLOCKED",
+      "AIO-DONE-INVALIDATED",
     ]);
     const normalizedId = id.trim().toUpperCase();
     const works = await listWorks(root);
@@ -702,8 +1097,6 @@ function validateWorkState(
   byId: Map<string, WorkMetadata>,
 ): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
-  const readyStatuses = new Set(["ready", "active", "verify", "done"]);
-  const verificationStatuses = new Set(["verify", "done"]);
 
   const requireCheck = (check: WorkCheck, description: string): void => {
     if (!metadata.checks[check]) {
@@ -716,19 +1109,15 @@ function validateWorkState(
     }
   };
 
-  if (readyStatuses.has(metadata.status)) {
+  if (metadata.status === "done") {
     requireCheck("scope", "scope");
     requireCheck("completion", "completion criteria");
-  }
-  if (verificationStatuses.has(metadata.status)) {
     requireCheck("verification", "verification");
-  }
-  if (metadata.status === "done") {
     requireCheck("outcome", "outcome");
     requireCheck("knowledge", "knowledge review");
   }
 
-  if (["active", "verify", "done"].includes(metadata.status)) {
+  if (metadata.status === "done") {
     for (const [index, dependencyId] of metadata.needs.entries()) {
       const dependency = byId.get(dependencyId);
       if (dependency && dependency.status !== "done") {
@@ -736,7 +1125,7 @@ function validateWorkState(
           code: "AIO-DEPENDENCY-BLOCKED",
           path: workFieldPath(metadata.id, `needs.${index}`),
           message: `Status ${metadata.status} requires dependency ${dependencyId} to be done; current status is ${dependency.status}.`,
-          hint: `Complete ${dependencyId} before starting this work item.`,
+          hint: `Complete ${dependencyId} or resolve the dependency before completing this work item.`,
         });
       }
     }

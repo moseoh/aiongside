@@ -58,9 +58,28 @@ views/
 
 Views are generated from Record metadata and must not be edited directly. `aiongside check` compares each View with a deterministic rendering of current Records. Missing, stale, manually modified, or line-ending-converted Views fail validation without changing files. Run `aiongside view rebuild` for explicit recovery.
 
-## Status gates
+## Work status
 
-AIongside validates review signals stored in Record frontmatter. Confirm them after reviewing the corresponding Record content:
+AIongside uses five statuses:
+
+- `inbox`: captured but not currently being worked.
+- `active`: work, review, or verification that can proceed now.
+- `waiting`: no action can proceed until an external response or condition changes.
+- `done`: completion requirements were reviewed and sealed.
+- `cancelled`: intentionally stopped while retaining the Record.
+
+Every status can move to every other status. Preview a move before applying it:
+
+```sh
+aiongside work move AIO-001 waiting --dry-run --json
+aiongside work move AIO-001 waiting \
+  --waiting-reason "Waiting for approval" \
+  --resume-when "Approval is received"
+```
+
+The JSON preview lists stable `requiredInputs`, questions, CLI options, changes, and warnings. Transition answers are written to machine-owned Record frontmatter, not the customizable template body.
+
+Moving to `done` validates review signals stored in Record frontmatter. Confirm them after reviewing the corresponding Record content:
 
 ```sh
 aiongside work confirm AIO-001 scope completion
@@ -68,10 +87,10 @@ aiongside work confirm AIO-001 verification
 aiongside work confirm AIO-001 outcome knowledge
 ```
 
-- `ready`, `active`, `verify`, and `done` require `scope` and `completion`.
-- `verify` and `done` require `verification`.
-- `done` requires `outcome` and `knowledge`.
-- `active`, `verify`, and `done` require every ID in `needs` to be `done`.
+- Only `done` requires `scope`, `completion`, `verification`, `outcome`, and `knowledge`.
+- Only `done` requires every ID in `needs` to be `done`.
+- Leaving `done` requires `--reopen-reason` or `--cancellation-reason`, invalidates the completion seal, and resets verification, outcome, and knowledge confirmations.
+- Changing completion-relevant content while the status remains `done` fails `aiongside check`.
 
 `needs` contains stable work item IDs in Record frontmatter. `aiongside check` rejects missing, duplicate, self-referencing, and cyclic dependencies. Confirmations are mechanical review signals; they do not prove that prose is true or complete.
 
@@ -81,8 +100,9 @@ aiongside work confirm AIO-001 outcome knowledge
 aiongside init
 aiongside work new <title>
 aiongside work confirm <id> <checks...>
-aiongside work move <id> <status>
-aiongside work cancel <id>
+aiongside work move <id> <status> --dry-run --json
+aiongside work move <id> <status> [transition options]
+aiongside work cancel <id> --cancellation-reason <text>
 aiongside work discard <id> --dry-run
 aiongside view rebuild
 aiongside check

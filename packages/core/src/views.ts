@@ -2,8 +2,6 @@ import { idNumber, type WorkMetadata } from "./model.js";
 
 const STATUS_ORDER = [
   "active",
-  "ready",
-  "verify",
   "waiting",
   "inbox",
   "done",

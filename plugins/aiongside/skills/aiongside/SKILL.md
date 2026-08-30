@@ -16,15 +16,18 @@ description: Manage local AIongside work Records and generated Views. Use when a
 - Initialize: `aiongside init`
 - Create: `aiongside work new "<title>"`
 - Confirm reviewed gates: `aiongside work confirm <ID> <checks...>`
-- Move: `aiongside work move <ID> <status>`
-- Cancel and retain history: `aiongside work cancel <ID>`
+- Preview move: `aiongside work move <ID> <status> --dry-run --json`
+- Apply move: `aiongside work move <ID> <status> <required-options>`
+- Cancel alias: `aiongside work cancel <ID> --cancellation-reason "<reason>"`
 - Preview discard: `aiongside work discard <ID> --dry-run`
 - Rebuild generated Views: `aiongside view rebuild`
 - Validate: `aiongside check`
 
 Use CLI commands for creation, status changes, confirmations, and discard. Edit other Record metadata only when no command exists. Do not hand-create IDs or rewrite generated View files.
 
-Before moving to `ready`, confirm `scope` and `completion`. Before moving to `verify`, confirm `verification`. Before moving to `done`, confirm `outcome` and `knowledge`. Dependencies in `needs` must be `done` before a work item becomes `active`.
+Before every status change, run the JSON dry-run. Read every entry in `missingInputs`, ask the user its `question`, and pass the answer through the listed `option`. Do not write transition reasons into the customizable Record body; the CLI stores them in machine-owned frontmatter.
+
+Before moving to `done`, confirm `scope`, `completion`, `verification`, `outcome`, and `knowledge`. Dependencies in `needs` must be `done` only when the work item becomes `done`.
 
 ## Discard
 
