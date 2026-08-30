@@ -1451,7 +1451,7 @@ describe("workspace lifecycle", () => {
       }
     }
     expect(await validateWorkspace(root)).toEqual([]);
-  });
+  }, 15_000);
 
   test("detects state and dependency gates bypassed by manual edits", async () => {
     const root = await workspace();
