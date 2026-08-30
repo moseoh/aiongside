@@ -146,15 +146,16 @@ export function createRulesDocument(): string {
   return `# AIongside work rules
 
 1. Read the relevant \`work/<ID>/record.md\` before starting work.
-2. Create a work item with \`aiongside work new\`.
-3. Preview every status change with \`aiongside work move <ID> <status> --dry-run --json\`.
-4. Ask the user for every input listed in \`missingInputs\` and pass each answer through its explicit CLI option.
-5. Confirm completed checks with \`aiongside work confirm\` before moving to \`done\`.
-6. Manage dependencies with \`aiongside work needs add\` and \`aiongside work needs remove\`; do not edit \`needs\` in frontmatter directly.
-7. Reopen \`done\` work before changing its dependencies.
-8. Apply the status change with \`aiongside work move\`; use \`work cancel\` only as a cancellation alias.
-9. Run \`aiongside work discard <ID> --dry-run\` before discarding a work item.
-10. Run \`aiongside check\` before finishing work.
+2. Store outside material in \`references/\`, delivery outputs in \`deliverables/\`, and direct observations in \`evidence/\`.
+3. Create a work item with \`aiongside work new\`.
+4. Preview every status change with \`aiongside work move <ID> <status> --dry-run --json\`.
+5. Ask the user for every input listed in \`missingInputs\` and pass each answer through its explicit CLI option.
+6. Confirm completed checks with \`aiongside work confirm\` before moving to \`done\`.
+7. Manage dependencies with \`aiongside work needs add\` and \`aiongside work needs remove\`; do not edit \`needs\` in frontmatter directly.
+8. Reopen \`done\` work before changing its dependencies.
+9. Apply the status change with \`aiongside work move\`; use \`work cancel\` only as a cancellation alias.
+10. Run \`aiongside work discard <ID> --dry-run\` before discarding a work item.
+11. Run \`aiongside check\` before finishing work.
 `;
 }
 

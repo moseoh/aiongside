@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -93,12 +100,14 @@ describe("workspace lifecycle", () => {
     expect(
       await pathExists(path.join(root, "work", created.id, "plan.md")),
     ).toBe(false);
+    for (const name of ["references", "deliverables", "evidence"]) {
+      expect(await pathExists(path.join(root, "work", created.id, name))).toBe(
+        true,
+      );
+    }
     expect(
       await pathExists(path.join(root, "work", created.id, "reports")),
-    ).toBe(true);
-    expect(
-      await pathExists(path.join(root, "work", created.id, "references")),
-    ).toBe(true);
+    ).toBe(false);
 
     await confirmWork(root, created.id, ["scope", "completion"]);
     const active = await moveWork(root, created.id, "active");
@@ -536,6 +545,92 @@ describe("workspace lifecycle", () => {
     expect(await validateWorkspace(root)).toEqual([]);
   });
 
+  test("detects every supporting file change after completion", async () => {
+    const cases = [
+      {
+        name: "added",
+        relativePath: ["references", "new.md"],
+        prepare: async (_target: string) => {},
+        mutate: async (target: string) => writeFile(target, "new source\n"),
+      },
+      {
+        name: "deleted",
+        relativePath: ["deliverables", "result.bin"],
+        prepare: async (target: string) =>
+          writeFile(target, Buffer.from([0x01, 0x02])),
+        mutate: async (target: string) => rm(target),
+      },
+      {
+        name: "renamed",
+        relativePath: ["evidence", "before.bin"],
+        prepare: async (target: string) =>
+          writeFile(target, Buffer.from([0x03, 0x04])),
+        mutate: async (target: string) =>
+          rename(target, path.join(path.dirname(target), "after.bin")),
+      },
+      {
+        name: "binary byte changed",
+        relativePath: ["evidence", "measurement.bin"],
+        prepare: async (target: string) =>
+          writeFile(target, Buffer.from([0x80])),
+        mutate: async (target: string) =>
+          writeFile(target, Buffer.from([0x81])),
+      },
+    ];
+
+    for (const testCase of cases) {
+      const root = await workspace();
+      const work = await createWork(root, `Supporting file ${testCase.name}`);
+      const target = path.join(root, "work", work.id, ...testCase.relativePath);
+      await testCase.prepare(target);
+      await confirmWork(root, work.id, [...allChecks]);
+      await moveWork(root, work.id, "done");
+      expect(await validateWorkspace(root), testCase.name).toEqual([]);
+
+      await testCase.mutate(target);
+
+      expect(await validateWorkspace(root), testCase.name).toContainEqual(
+        expect.objectContaining({ code: "AIO-DONE-INVALIDATED" }),
+      );
+      await moveWork(root, work.id, "active", {
+        reopenReason: `Supporting file ${testCase.name}`,
+      });
+      expect(
+        (await validateWorkspace(root)).some(
+          (issue) => issue.code === "AIO-DONE-INVALIDATED",
+        ),
+        testCase.name,
+      ).toBe(false);
+    }
+  });
+
+  test("preserves Markdown normalization outside supporting directories", async () => {
+    const root = await workspace();
+    const work = await createWork(root, "Normalized Markdown completion");
+    await confirmWork(root, work.id, [...allChecks]);
+    await moveWork(root, work.id, "done");
+    const overviewPath = path.join(root, "work", work.id, "overview.md");
+    const overview = await readFile(overviewPath, "utf8");
+
+    await writeFile(overviewPath, overview.replaceAll("\n", "\r\n"));
+
+    expect(await validateWorkspace(root)).toEqual([]);
+  });
+
+  test("keeps Knowledge Registry outside individual completion seals", async () => {
+    const root = await workspace();
+    const work = await createWork(root, "Shared knowledge boundary");
+    await confirmWork(root, work.id, [...allChecks]);
+    await moveWork(root, work.id, "done");
+
+    await writeFile(
+      path.join(root, "knowledge", "registry.md"),
+      "A user-defined Knowledge Registry format\n",
+    );
+
+    expect(await validateWorkspace(root)).toEqual([]);
+  });
+
   test("creates an initial seal for a legacy done record", async () => {
     const root = await workspace();
     const work = await createWork(root, "Legacy completion");
@@ -675,6 +770,122 @@ describe("workspace lifecycle", () => {
     expect(
       issues.some((issue) => issue.code === "AIO-IDENTITY-DIRECTORY"),
     ).toBe(true);
+  });
+
+  test("validates Knowledge structure independently from work structure", async () => {
+    const root = await workspace();
+    const work = await createWork(root, "Multiple structure problems");
+    await rm(path.join(root, "knowledge", "registry.md"));
+    await rm(path.join(root, "work", work.id, "references"), {
+      recursive: true,
+    });
+
+    const codes = new Set(
+      (await validateWorkspace(root)).map((issue) => issue.code),
+    );
+    expect(codes).toEqual(
+      new Set(["AIO-STRUCTURE-KNOWLEDGE-REGISTRY", "AIO-STRUCTURE-REFERENCES"]),
+    );
+
+    const wrongDirectoryRoot = await workspace();
+    await rm(path.join(wrongDirectoryRoot, "knowledge"), { recursive: true });
+    await writeFile(path.join(wrongDirectoryRoot, "knowledge"), "not a dir");
+    expect(await validateWorkspace(wrongDirectoryRoot)).toContainEqual(
+      expect.objectContaining({ code: "AIO-STRUCTURE-KNOWLEDGE" }),
+    );
+
+    const wrongRegistryRoot = await workspace();
+    await rm(path.join(wrongRegistryRoot, "knowledge", "registry.md"));
+    await mkdir(path.join(wrongRegistryRoot, "knowledge", "registry.md"));
+    expect(await validateWorkspace(wrongRegistryRoot)).toContainEqual(
+      expect.objectContaining({
+        code: "AIO-STRUCTURE-KNOWLEDGE-REGISTRY",
+      }),
+    );
+  });
+
+  test("validates every supporting directory even with an invalid Record", async () => {
+    const root = await workspace();
+    const work = await createWork(root, "Damaged support structure");
+    const workPath = path.join(root, "work", work.id);
+    await rm(path.join(workPath, "references"), { recursive: true });
+    await rm(path.join(workPath, "deliverables"), { recursive: true });
+    await writeFile(path.join(workPath, "deliverables"), "not a directory");
+    await rm(path.join(workPath, "evidence"), { recursive: true });
+    const recordPath = path.join(workPath, "record.md");
+    await writeFile(
+      recordPath,
+      (await readFile(recordPath, "utf8")).replace(
+        "status: inbox",
+        "status: invalid",
+      ),
+    );
+
+    const codes = new Set(
+      (await validateWorkspace(root)).map((issue) => issue.code),
+    );
+    expect(codes).toEqual(
+      new Set([
+        "AIO-STRUCTURE-REFERENCES",
+        "AIO-STRUCTURE-DELIVERABLES",
+        "AIO-STRUCTURE-EVIDENCE",
+        "AIO-SCHEMA-RECORD",
+      ]),
+    );
+  });
+
+  test("leaves arbitrary supporting content and Registry text untouched", async () => {
+    const root = await workspace();
+    const work = await createWork(root, "Opaque supporting content");
+    const binaryPath = path.join(
+      root,
+      "work",
+      work.id,
+      "evidence",
+      "nested",
+      "result.bin",
+    );
+    const registryPath = path.join(root, "knowledge", "registry.md");
+    await mkdir(path.dirname(binaryPath), { recursive: true });
+    await writeFile(binaryPath, Buffer.from([0x00, 0x80, 0xff]));
+    await writeFile(registryPath, "Any user-owned format\n");
+    const targets = [
+      path.join(root, "work", work.id, "record.md"),
+      path.join(root, "views", "open.md"),
+      path.join(root, "views", "closed.md"),
+      binaryPath,
+      registryPath,
+    ];
+    const before = await Promise.all(targets.map((target) => readFile(target)));
+
+    expect(await validateWorkspace(root)).toEqual([]);
+
+    const after = await Promise.all(targets.map((target) => readFile(target)));
+    expect(after).toEqual(before);
+  });
+
+  test("blocks mutations when supporting structure is invalid", async () => {
+    const root = await workspace();
+    const work = await createWork(root, "Blocked support mutation");
+    await rm(path.join(root, "work", work.id, "evidence"), {
+      recursive: true,
+    });
+    const targets = [
+      path.join(root, "work", work.id, "record.md"),
+      path.join(root, "views", "open.md"),
+      path.join(root, "views", "closed.md"),
+    ];
+    const before = await Promise.all(
+      targets.map((target) => readFile(target, "utf8")),
+    );
+
+    await expect(confirmWork(root, work.id, ["scope"])).rejects.toMatchObject({
+      code: "AIO-WORKSPACE-INVALID",
+      message: expect.stringContaining("AIO-STRUCTURE-EVIDENCE"),
+    });
+    expect(
+      await Promise.all(targets.map((target) => readFile(target, "utf8"))),
+    ).toEqual(before);
   });
 
   test("does not mutate files during validation", async () => {

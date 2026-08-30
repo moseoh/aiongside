@@ -31,6 +31,16 @@ Before every status change, run the JSON dry-run. Read every entry in `missingIn
 
 Before moving to `done`, confirm `scope`, `completion`, `verification`, `outcome`, and `knowledge`. Dependencies in `needs` must be `done` only when the work item becomes `done`. Reopen `done` work before adding or removing a dependency.
 
+## Supporting content
+
+- Store material received from outside the work in `references/`.
+- Store reports, instructions, presentations, spreadsheets, exports, and other delivery outputs in `deliverables/`.
+- Store logs, query results, screenshots, measurements, command output, and other direct observations in `evidence/`.
+
+Do not impose file names, formats, or a nested structure inside these directories. Do not rewrite their contents automatically. Reopen `done` work before changing supporting content because file paths and exact bytes are covered by the completion seal.
+
+For an older workspace, review any `reports/` content and move delivery outputs into `deliverables/`. Create `evidence/` if it is missing. Never move or delete legacy files without the user's approval.
+
 ## Discard
 
 Discard is always a two-step operation.

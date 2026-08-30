@@ -43,6 +43,11 @@ const RECORD_NAME = "record.md";
 const AGENT_MARKER = ".aiongside/rules.md";
 const TEMPLATE_DIR = path.join(".aiongside", "templates");
 const VIEW_PATHS = ["views/open.md", "views/closed.md"] as const;
+const SUPPORTING_CONTENT_DIRECTORIES = [
+  { name: "references", code: "AIO-STRUCTURE-REFERENCES" },
+  { name: "deliverables", code: "AIO-STRUCTURE-DELIVERABLES" },
+  { name: "evidence", code: "AIO-STRUCTURE-EVIDENCE" },
+] as const;
 const DEPENDENCY_RELATION_CODES = new Set([
   "AIO-DEPENDENCY-MISSING",
   "AIO-DEPENDENCY-SELF",
@@ -272,7 +277,7 @@ export async function createWork(
           path.join(staging, OVERVIEW_NAME),
           createOverviewDocument(metadata, overviewTemplate),
         ),
-        ...["reports", "references"].map((name) =>
+        ...SUPPORTING_CONTENT_DIRECTORIES.map(({ name }) =>
           mkdir(path.join(staging, name), { recursive: true }),
         ),
       ]);
@@ -744,6 +749,7 @@ export async function validateWorkspace(
   }
 
   issues.push(...(await validateWorkspaceTemplates(root)));
+  issues.push(...(await validateKnowledgeStructure(root)));
 
   const workRoot = path.join(root, WORK_DIR);
   let entries: Dirent[];
@@ -773,6 +779,9 @@ export async function validateWorkspace(
       continue;
     }
     const directoryPath = path.join(workRoot, entry.name);
+    issues.push(
+      ...(await validateWorkSupportingStructure(root, directoryPath)),
+    );
     const recordPath = path.join(directoryPath, RECORD_NAME);
     const overviewPath = path.join(directoryPath, OVERVIEW_NAME);
     const hasOverview = await pathExists(overviewPath);
@@ -1076,11 +1085,21 @@ async function calculateCompletionDigest(
       continue;
     }
     hash.update(`\0${file}\0`);
-    hash.update(
-      normalizeCompletionText(await readFile(path.join(root, file), "utf8")),
-    );
+    if (isSupportingContentFile(file, id)) {
+      hash.update(await readFile(path.join(root, file)));
+    } else {
+      hash.update(
+        normalizeCompletionText(await readFile(path.join(root, file), "utf8")),
+      );
+    }
   }
   return hash.digest("hex");
+}
+
+function isSupportingContentFile(file: string, id: string): boolean {
+  return SUPPORTING_CONTENT_DIRECTORIES.some(({ name }) =>
+    file.startsWith(`${WORK_DIR}/${id}/${name}/`),
+  );
 }
 
 function normalizeCompletionText(source: string): string {
@@ -1358,6 +1377,100 @@ function validateWorkState(
 
 function workFieldPath(id: string, field: string): string {
   return `${WORK_DIR}/${id}/${RECORD_NAME}#${field}`;
+}
+
+async function validateKnowledgeStructure(
+  root: string,
+): Promise<ValidationIssue[]> {
+  const knowledgePath = path.join(root, "knowledge");
+  let knowledgeStat: Awaited<ReturnType<typeof stat>>;
+  try {
+    knowledgeStat = await stat(knowledgePath);
+  } catch (error) {
+    return [
+      {
+        code: "AIO-STRUCTURE-KNOWLEDGE",
+        path: relative(root, knowledgePath),
+        message: `Cannot read required knowledge directory: ${errorMessage(error)}`,
+        hint: "Restore the knowledge directory.",
+      },
+    ];
+  }
+  if (!knowledgeStat.isDirectory()) {
+    return [
+      {
+        code: "AIO-STRUCTURE-KNOWLEDGE",
+        path: relative(root, knowledgePath),
+        message: "Required knowledge path is not a directory.",
+        hint: "Replace it with a knowledge directory.",
+      },
+    ];
+  }
+
+  const registryPath = path.join(knowledgePath, "registry.md");
+  try {
+    const registryStat = await stat(registryPath);
+    if (!registryStat.isFile()) {
+      return [
+        {
+          code: "AIO-STRUCTURE-KNOWLEDGE-REGISTRY",
+          path: relative(root, registryPath),
+          message: "Knowledge Registry is not a regular file.",
+          hint: "Restore knowledge/registry.md as a regular file.",
+        },
+      ];
+    }
+    await readFile(registryPath);
+    return [];
+  } catch (error) {
+    return [
+      {
+        code: "AIO-STRUCTURE-KNOWLEDGE-REGISTRY",
+        path: relative(root, registryPath),
+        message: `Cannot read Knowledge Registry: ${errorMessage(error)}`,
+        hint: "Restore a readable knowledge/registry.md file.",
+      },
+    ];
+  }
+}
+
+async function validateWorkSupportingStructure(
+  root: string,
+  workPath: string,
+): Promise<ValidationIssue[]> {
+  const issues: ValidationIssue[] = [];
+  for (const definition of SUPPORTING_CONTENT_DIRECTORIES) {
+    const target = path.join(workPath, definition.name);
+    try {
+      const targetStat = await stat(target);
+      if (targetStat.isDirectory()) {
+        continue;
+      }
+      issues.push({
+        code: definition.code,
+        path: relative(root, target),
+        message: `Required ${definition.name} path is not a directory.`,
+        hint: supportingDirectoryHint(definition.name),
+      });
+    } catch (error) {
+      issues.push({
+        code: definition.code,
+        path: relative(root, target),
+        message: `Cannot read required ${definition.name} directory: ${errorMessage(error)}`,
+        hint: supportingDirectoryHint(definition.name),
+      });
+    }
+  }
+  return issues;
+}
+
+function supportingDirectoryHint(
+  name: (typeof SUPPORTING_CONTENT_DIRECTORIES)[number]["name"],
+): string {
+  if (name === "deliverables") {
+    return "Create the deliverables directory and move report outputs from reports if needed.";
+  }
+  return `Restore the ${name} directory.`;
 }
 
 async function validateOverview(

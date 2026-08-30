@@ -47,14 +47,25 @@ work/<ID>/
   record.md
   overview.md
   plan.md              # Created when the work item moves to active
-  reports/
   references/
+  deliverables/
+  evidence/
 views/
   open.md
   closed.md
 ```
 
 `record.md` is the canonical work document. It owns status, progress, decisions, and outcomes. `overview.md` is the short human-readable entry point and does not duplicate dynamic state. `plan.md` is optional and is created when a work item moves to `active`.
+
+Each new work item includes three user-owned content directories:
+
+- `references/`: material received from outside the work, such as official documents, vendor replies, source files, and links.
+- `deliverables/`: outputs produced for delivery, such as reports, instructions, presentations, spreadsheets, and exports.
+- `evidence/`: results observed directly in the current environment, such as logs, query results, screenshots, measurements, and command output.
+
+AIongside requires these directories but does not constrain their file names, formats, or nested structure. Their contents are never rewritten automatically. File paths and exact bytes in all three directories are covered by the completion seal, so changing them while work remains `done` fails validation. Direct edits do not update Record metadata or generated Views.
+
+Older workspaces may contain `reports/` instead of `deliverables/` and may not contain `evidence/`. AIongside does not move or delete those files automatically. Review the existing content, move delivery outputs into a new `deliverables/` directory, and create `evidence/` before running further mutations.
 
 Views are generated from Record metadata and must not be edited directly. `aiongside check` compares each View with a deterministic rendering of current Records. Missing, stale, manually modified, or line-ending-converted Views fail validation without changing files. Run `aiongside view rebuild` for explicit recovery.
 
