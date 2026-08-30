@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -60,6 +60,7 @@ export async function smokePackage(tarball) {
       maxBuffer: 10 * 1024 * 1024,
     };
     const help = await execFileAsync(cli, ["--help"], options);
+    const version = await execFileAsync(cli, ["--version"], options);
     const initialized = await execFileAsync(cli, ["init", workspace], options);
     const checked = await execFileAsync(
       cli,
@@ -69,6 +70,20 @@ export async function smokePackage(tarball) {
 
     if (!help.stdout.includes("Usage: aiongside")) {
       throw new Error("Installed CLI help output is invalid.");
+    }
+    const npmRoot = await execFileAsync(
+      "npm",
+      ["root", "--global", "--prefix", prefix],
+      { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 },
+    );
+    const manifest = JSON.parse(
+      await readFile(
+        path.join(npmRoot.stdout.trim(), "aiongside", "package.json"),
+        "utf8",
+      ),
+    );
+    if (version.stdout !== `${manifest.version}\n`) {
+      throw new Error("Installed CLI version does not match package metadata.");
     }
     if (!initialized.stdout.includes("Initialized")) {
       throw new Error("Installed CLI initialization output is invalid.");

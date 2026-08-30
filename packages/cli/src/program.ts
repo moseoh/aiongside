@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import path from "node:path";
 import {
   addWorkDependency,
@@ -19,6 +20,10 @@ import {
 } from "@aiongside/filesystem";
 import { Command, Option } from "commander";
 
+const cliVersion = (
+  createRequire(import.meta.url)("../package.json") as { version: string }
+).version;
+
 interface GlobalOptions {
   root?: string;
 }
@@ -28,7 +33,7 @@ export function createProgram(): Command {
   program
     .name("aiongside")
     .description("A local-first workspace for people and AI")
-    .version("0.0.0")
+    .version(cliVersion)
     .option("--root <path>", "AIongside workspace path");
 
   program

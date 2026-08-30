@@ -26,6 +26,17 @@ async function cli(args: string[]) {
 }
 
 describe("CLI", () => {
+  test("reports the package version", async () => {
+    const manifest = JSON.parse(
+      await readFile(
+        path.resolve(import.meta.dirname, "../package.json"),
+        "utf8",
+      ),
+    ) as { version: string };
+
+    expect((await cli(["--version"])).stdout).toBe(`${manifest.version}\n`);
+  });
+
   test("runs initialization, creation, movement, and validation", async () => {
     const root = await tempRoot();
 
