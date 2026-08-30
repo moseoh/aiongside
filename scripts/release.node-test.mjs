@@ -16,14 +16,14 @@ test("rejects a mismatched release tag before checking the registry", async () =
         return false;
       },
     }),
-    /Release tag must be v0\.2\.0/,
+    /Release tag must be v0\.2\.1/,
   );
   assert.equal(registryChecked, false);
 });
 
 test("rejects an already published package version", async () => {
   await assert.rejects(
-    verifyRelease("v0.2.0", { versionExists: async () => true }),
-    /aiongside@0\.2\.0 is already published/,
+    verifyRelease("v0.2.1", { versionExists: async () => true }),
+    /aiongside@0\.2\.1 is already published/,
   );
 });

@@ -132,7 +132,7 @@ export async function smokePackage(tarball) {
     if (version.stdout !== `${manifest.version}\n`) {
       throw new Error("Installed CLI version does not match package metadata.");
     }
-    if (!initialized.stdout.includes("Initialized")) {
+    if (!initialized.stdout.includes("✓ Workspace initialized")) {
       throw new Error("Installed CLI initialization output is invalid.");
     }
     if (!synced.stdout.includes("Agent integration is current")) {
@@ -234,7 +234,7 @@ export async function smokePackage(tarball) {
       ["--root", workspace, "check"],
       options,
     );
-    if (checked.stdout !== "Check passed\n") {
+    if (checked.stdout !== "✓ Check passed\n") {
       throw new Error("Installed CLI check output is invalid.");
     }
   } finally {

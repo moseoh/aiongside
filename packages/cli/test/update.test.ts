@@ -3,21 +3,22 @@ import {
   compareSemanticVersions,
   fetchLatestVersion,
   performUpdate,
+  type UpdateEvent,
   type UpdateRuntime,
 } from "../src/update.js";
 
 function runtime(
   overrides: Partial<UpdateRuntime> = {},
-): UpdateRuntime & { output: string[] } {
-  const output: string[] = [];
+): UpdateRuntime & { events: UpdateEvent[] } {
+  const events: UpdateEvent[] = [];
   return {
-    output,
+    events,
     getLatestVersion: async () => "0.2.0",
     interactive: true,
     confirm: async () => true,
     runProcess: async () => 0,
     syncCurrent: async () => undefined,
-    write: (message) => output.push(message),
+    report: (event) => events.push(event),
     ...overrides,
   };
 }
@@ -82,6 +83,9 @@ describe("CLI update", () => {
       );
       expect(syncCurrent).toHaveBeenCalledWith("/workspace");
       expect(runProcess).not.toHaveBeenCalled();
+      expect(testRuntime.events).toEqual([
+        { type: "current", version: "0.1.0" },
+      ]);
     }
   });
 
@@ -95,10 +99,15 @@ describe("CLI update", () => {
       { root: "/workspace", currentVersion: "0.1.0" },
       testRuntime,
     );
-    expect(testRuntime.output.join("")).toContain(
-      "npm install --global aiongside@0.2.0",
-    );
-    expect(testRuntime.output.join("")).toContain("No changes made");
+    expect(testRuntime.events).toEqual([
+      {
+        type: "available",
+        currentVersion: "0.1.0",
+        latestVersion: "0.2.0",
+        command: "npm install --global aiongside@0.2.0",
+      },
+      { type: "cancelled" },
+    ]);
     expect(runProcess).not.toHaveBeenCalled();
     expect(syncCurrent).not.toHaveBeenCalled();
   });
@@ -129,9 +138,16 @@ describe("CLI update", () => {
       ["npm", ["install", "--global", "aiongside@0.2.0"]],
       ["aiongside", ["--root", "/workspace", "skill", "sync"]],
     ]);
-    expect(testRuntime.output.join("")).toContain(
-      "CLI and workspace agent integration updated",
-    );
+    expect(testRuntime.events).toEqual([
+      {
+        type: "available",
+        currentVersion: "0.1.0",
+        latestVersion: "0.2.0",
+        command: "npm install --global aiongside@0.2.0",
+      },
+      { type: "installed", version: "0.2.0" },
+      { type: "complete" },
+    ]);
   });
 
   test("accepts --yes without prompting", async () => {

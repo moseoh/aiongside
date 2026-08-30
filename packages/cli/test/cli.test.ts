@@ -99,11 +99,19 @@ describe("CLI", () => {
     ]);
     const checked = await cli(["--root", root, "check"]);
 
-    expect(initialized.stdout).toContain("Initialized");
-    expect(created.stdout).toContain("WORK-1 First Work");
-    expect(confirmed.stdout).toContain("WORK-1 scope, completion");
-    expect(moved.stdout).toContain("WORK-1 inbox -> active");
-    expect(checked.stdout).toBe("Check passed\n");
+    expect(initialized.stdout).toContain("✓ Workspace initialized");
+    expect(initialized.stdout).toContain(`• Root          ${root}`);
+    expect(initialized.stdout).toContain("• ID prefix     WORK");
+    expect(initialized.stdout).toContain("+ Agent Skills");
+    expect(initialized.stdout).toContain("+ Instructions");
+    expect(initialized.stdout).toContain("+ Hooks");
+    expect(initialized.stdout).toContain("! Approve project Hooks");
+    expect(initialized.stdout).toContain("→ Create your first work:");
+    expect(initialized.stdout).not.toContain("\u001b[");
+    expect(created.stdout).toContain("WORK-1 — First Work");
+    expect(confirmed.stdout).toContain("WORK-1 — scope, completion");
+    expect(moved.stdout).toContain("WORK-1 — inbox → active");
+    expect(checked.stdout).toBe("✓ Check passed\n");
   });
 
   test("documents explicit transition options in move help", async () => {
@@ -139,12 +147,12 @@ describe("CLI", () => {
 
     expect(help.stdout).toContain("sync");
     expect(syncHelp.stdout).toContain("Overview review");
-    expect(synced.stdout).toBe("Synced: WORK-1 work/WORK-1/overview.md\n");
+    expect(synced.stdout).toBe("✓ Synced WORK-1 — work/WORK-1/overview.md\n");
     expect(unchanged.stdout).toBe(
-      "Overview current: WORK-1 work/WORK-1/overview.md\nNo changes made.\n",
+      "✓ Overview is current for WORK-1 — work/WORK-1/overview.md\n",
     );
     expect((await cli(["--root", root, "check"])).stdout).toBe(
-      "Check passed\n",
+      "✓ Check passed\n",
     );
     await expect(
       cli(["--root", root, "work", "sync", "WORK-999"]),
@@ -187,18 +195,18 @@ describe("CLI", () => {
     const synced = await cli(["--root", nested, "skill", "sync"]);
     expect(synced.stdout).toContain("Agent integration synced (version 4)");
     expect(synced.stdout).toContain(
-      "Created: .agents/skills/aiongside/SKILL.md",
+      "+ Created  .agents/skills/aiongside/SKILL.md",
     );
     expect(synced.stdout).toContain(
-      "Created: .claude/skills/aiongside/SKILL.md",
+      "+ Created  .claude/skills/aiongside/SKILL.md",
     );
-    expect(synced.stdout).toContain("Created: .claude/settings.json");
-    expect(synced.stdout).toContain("Updated: .aiongside/config.yaml");
+    expect(synced.stdout).toContain("+ Created  .claude/settings.json");
+    expect(synced.stdout).toContain("~ Updated  .aiongside/config.yaml");
     expect(synced.stdout).toContain("Approve project Hooks");
 
     const noOp = await cli(["--root", root, "skill", "sync"]);
     expect(noOp.stdout).toContain(
-      "Agent integration is current (version 4)\nNo changes made.\n",
+      "✓ Agent integration is current (version 4)\n",
     );
     expect(noOp.stdout).toContain("Approve project Hooks");
   });
@@ -244,6 +252,9 @@ describe("CLI", () => {
         additionalContext: string;
       };
     };
+
+    expect(result.stdout).toBe(`${JSON.stringify(output)}\n`);
+    expect(result.stderr).toBe("");
 
     expect(output.hookSpecificOutput.hookEventName).toBe("SessionStart");
     expect(output.hookSpecificOutput.additionalContext).toContain(
@@ -342,7 +353,7 @@ describe("CLI", () => {
       "work-1",
       "work-2",
     ]);
-    expect(added.stdout).toBe("Dependency added: WORK-1 needs WORK-2\n");
+    expect(added.stdout).toBe("✓ Added dependency — WORK-1 needs WORK-2\n");
     const removed = await cli([
       "--root",
       root,
@@ -353,7 +364,7 @@ describe("CLI", () => {
       "WORK-2",
     ]);
     expect(removed.stdout).toBe(
-      "Dependency removed: WORK-1 no longer needs WORK-2\n",
+      "✓ Removed dependency — WORK-1 no longer needs WORK-2\n",
     );
 
     const paths = [
@@ -374,13 +385,12 @@ describe("CLI", () => {
       "WORK-2",
     ]);
 
-    expect(noOp.stdout).toContain("Dependency unchanged");
-    expect(noOp.stdout).toContain("No changes made");
+    expect(noOp.stdout).toContain("Dependency is already absent");
     expect(
       await Promise.all(paths.map((target) => readFile(target, "utf8"))),
     ).toEqual(beforeNoOp);
     expect((await cli(["--root", root, "check"])).stdout).toBe(
-      "Check passed\n",
+      "✓ Check passed\n",
     );
   });
 
@@ -497,6 +507,8 @@ describe("CLI", () => {
       "--waiting-reason",
       "--resume-when",
     ]);
+    expect(preview.stdout).toBe(`${JSON.stringify(result, null, 2)}\n`);
+    expect(preview.stderr).toBe("");
     expect(await readFile(recordPath, "utf8")).toBe(before);
   });
 
@@ -656,10 +668,8 @@ describe("CLI", () => {
       "--confirm",
       "WORK-1",
     ]);
-    expect(discarded.stdout).toContain("Discarded: WORK-1");
-    expect(discarded.stdout).toContain(
-      "Recovery location: .aiongside/trash/WORK-1-",
-    );
+    expect(discarded.stdout).toContain("✓ Discarded WORK-1");
+    expect(discarded.stdout).toContain("• Recovery  .aiongside/trash/WORK-1-");
   });
 
   test("reports View drift without writing and rebuilds explicitly", async () => {
@@ -677,9 +687,9 @@ describe("CLI", () => {
     expect(await readFile(viewPath, "utf8")).toBe(modified);
 
     const rebuilt = await cli(["--root", root, "view", "rebuild"]);
-    expect(rebuilt.stdout).toBe("Views rebuilt\n");
+    expect(rebuilt.stdout).toBe("✓ Views rebuilt\n");
     expect((await cli(["--root", root, "check"])).stdout).toBe(
-      "Check passed\n",
+      "✓ Check passed\n",
     );
   });
 });

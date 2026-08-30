@@ -1,5 +1,4 @@
 import { spawn } from "node:child_process";
-import { createInterface } from "node:readline/promises";
 import { WorkspaceError } from "@aiongside/filesystem";
 
 const SEMVER_PATTERN =
@@ -25,8 +24,20 @@ export interface UpdateRuntime {
   confirm: () => Promise<boolean>;
   runProcess: (command: string, args: string[]) => Promise<number>;
   syncCurrent: (root: string) => Promise<void>;
-  write: (message: string) => void;
+  report: (event: UpdateEvent) => void;
 }
+
+export type UpdateEvent =
+  | { type: "current"; version: string }
+  | {
+      type: "available";
+      currentVersion: string;
+      latestVersion: string;
+      command: string;
+    }
+  | { type: "cancelled" }
+  | { type: "installed"; version: string }
+  | { type: "complete" };
 
 export function parseSemanticVersion(version: string): ParsedVersion {
   const match = SEMVER_PATTERN.exec(version);
@@ -126,15 +137,18 @@ export async function performUpdate(
   }
 
   if (compareSemanticVersions(latestVersion, options.currentVersion) <= 0) {
-    runtime.write(`AIongside is current (${options.currentVersion}).\n`);
+    runtime.report({ type: "current", version: options.currentVersion });
     await runtime.syncCurrent(options.root);
     return;
   }
 
   const packageTarget = `aiongside@${latestVersion}`;
-  runtime.write(
-    `AIongside update available: ${options.currentVersion} -> ${latestVersion}\nCommand: npm install --global ${packageTarget}\n`,
-  );
+  runtime.report({
+    type: "available",
+    currentVersion: options.currentVersion,
+    latestVersion,
+    command: `npm install --global ${packageTarget}`,
+  });
   let approved = options.yes === true;
   if (!approved) {
     if (!runtime.interactive) {
@@ -146,7 +160,7 @@ export async function performUpdate(
     approved = await runtime.confirm();
   }
   if (!approved) {
-    runtime.write("Update cancelled. No changes made.\n");
+    runtime.report({ type: "cancelled" });
     return;
   }
 
@@ -170,7 +184,7 @@ export async function performUpdate(
     );
   }
 
-  runtime.write(`Installed AIongside ${latestVersion}.\n`);
+  runtime.report({ type: "installed", version: latestVersion });
   let syncStatus: number;
   try {
     syncStatus = await runtime.runProcess("aiongside", [
@@ -185,7 +199,7 @@ export async function performUpdate(
   if (syncStatus !== 0) {
     throw updateSyncError(options.root, `exit status ${syncStatus}`);
   }
-  runtime.write("CLI and workspace agent integration updated.\n");
+  runtime.report({ type: "complete" });
 }
 
 export function defaultRunProcess(
@@ -203,22 +217,6 @@ export function defaultRunProcess(
       resolve(code ?? 1);
     });
   });
-}
-
-export async function confirmUpdate(): Promise<boolean> {
-  const prompt = createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-  try {
-    const answer = await prompt.question("Install this update? [y/N] ");
-    return (
-      answer.trim().toLowerCase() === "y" ||
-      answer.trim().toLowerCase() === "yes"
-    );
-  } finally {
-    prompt.close();
-  }
 }
 
 function updateSyncError(root: string, detail: string): WorkspaceError {

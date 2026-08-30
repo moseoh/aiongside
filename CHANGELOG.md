@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.1 - 2026-08-30
+
+### Changed
+
+- Standardized human-readable CLI output around shared result, status row, warning, error, summary, and next-action primitives.
+- Made initialization explain the workspace root, ID prefix, managed Agent integration, Hook approval, and first work command in one consistent result.
+- Preserved Hook and transition JSON as undecorated machine output.
+
+### Added
+
+- TTY-aware CLI colors with plain-text output for pipes, captured output, and `NO_COLOR`.
+
 ## 0.2.0 - 2026-08-30
 
 ### Breaking changes

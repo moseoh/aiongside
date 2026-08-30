@@ -1,6 +1,6 @@
 {
   "name": "aiongside",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A local-first workspace for people and AI",
   "license": "MIT",
   "repository": {
@@ -31,6 +31,7 @@
   "devDependencies": {
     "@aiongside/core": "workspace:*",
     "@aiongside/filesystem": "workspace:*",
-    "commander": "^14.0.0"
+    "commander": "^14.0.0",
+    "picocolors": "^1.1.1"
   }
 }

@@ -27,11 +27,12 @@ import {
   WorkspaceError,
 } from "@aiongside/filesystem";
 import { Command, Option } from "commander";
+import { ui } from "./ui.js";
 import {
-  confirmUpdate,
   defaultRunProcess,
   fetchLatestVersion,
   performUpdate,
+  type UpdateEvent,
 } from "./update.js";
 
 const cliVersion = (
@@ -43,26 +44,47 @@ interface GlobalOptions {
 }
 
 const HOOK_TRUST_NOTICE =
-  "Approve project Hooks in Claude Code or Codex CLI when prompted. AIongside does not change user trust settings.\n";
+  "Approve project Hooks in Claude Code or Codex CLI when prompted. AIongside does not change user trust settings.";
 
 function writeAgentSkillSyncResult(
   result: Awaited<ReturnType<typeof syncAgentSkills>>,
 ): void {
   if (result.changes.length === 0) {
-    process.stdout.write(
-      `Agent integration is current (version ${result.version})\nNo changes made.\n`,
-    );
-    process.stdout.write(HOOK_TRUST_NOTICE);
+    ui.success(`Agent integration is current (version ${result.version})`);
+    ui.warning(HOOK_TRUST_NOTICE);
     return;
   }
-  process.stdout.write(
-    `Agent integration synced (version ${result.version})\n`,
+  ui.success(`Agent integration synced (version ${result.version})`);
+  ui.rows(
+    result.changes.map((change) => ({
+      status: change.action === "created" ? "create" : "update",
+      label: change.action === "created" ? "Created" : "Updated",
+      detail: change.path,
+    })),
   );
-  for (const change of result.changes) {
-    const label = change.action === "created" ? "Created" : "Updated";
-    process.stdout.write(`${label}: ${change.path}\n`);
+  ui.warning(HOOK_TRUST_NOTICE);
+}
+
+function writeUpdateEvent(event: UpdateEvent): void {
+  switch (event.type) {
+    case "current":
+      ui.success(`AIongside is current (${event.version})`);
+      return;
+    case "available":
+      ui.info(
+        `Update available — ${event.currentVersion} → ${event.latestVersion}`,
+      );
+      ui.rows([{ label: "Command", detail: event.command }]);
+      return;
+    case "cancelled":
+      ui.info("Update cancelled — no changes made");
+      return;
+    case "installed":
+      ui.success(`Installed AIongside ${event.version}`);
+      return;
+    case "complete":
+      ui.success("CLI and workspace agent integration updated");
   }
-  process.stdout.write(HOOK_TRUST_NOTICE);
 }
 
 export function createProgram(): Command {
@@ -85,10 +107,31 @@ export function createProgram(): Command {
         ...(options.name ? { name: options.name } : {}),
         idPrefix: options.prefix,
       });
-      process.stdout.write(
-        `Initialized: ${root}\nID prefix: ${config.idPrefix}\nManaged agent integration: .agents/skills/aiongside/SKILL.md, .claude/skills/aiongside/SKILL.md, .aiongside/instructions.md, .claude/settings.json, .codex/hooks.json\n`,
+      ui.success("Workspace initialized");
+      ui.rows([
+        { label: "Root", detail: root },
+        { label: "ID prefix", detail: config.idPrefix },
+        {
+          status: "create",
+          label: "Agent Skills",
+          detail:
+            ".agents/skills/aiongside/SKILL.md · .claude/skills/aiongside/SKILL.md",
+        },
+        {
+          status: "create",
+          label: "Instructions",
+          detail: ".aiongside/instructions.md",
+        },
+        {
+          status: "create",
+          label: "Hooks",
+          detail: ".claude/settings.json · .codex/hooks.json",
+        },
+      ]);
+      ui.warning(HOOK_TRUST_NOTICE);
+      ui.hint(
+        `Create your first work: aiongside --root ${JSON.stringify(root)} work new "First Work"`,
       );
-      process.stdout.write(HOOK_TRUST_NOTICE);
     });
 
   program
@@ -106,12 +149,12 @@ export function createProgram(): Command {
         {
           getLatestVersion: fetchLatestVersion,
           interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
-          confirm: confirmUpdate,
+          confirm: () => ui.confirm("Install this update?"),
           runProcess: defaultRunProcess,
           syncCurrent: async (workspaceRoot) => {
             writeAgentSkillSyncResult(await syncAgentSkills(workspaceRoot));
           },
-          write: (message) => process.stdout.write(message),
+          report: writeUpdateEvent,
         },
       );
     });
@@ -166,8 +209,8 @@ export function createProgram(): Command {
     .action(async (title: string) => {
       const root = await commandRoot(program);
       const metadata = await createWork(root, title);
-      process.stdout.write(
-        `Created: ${metadata.id} ${metadata.title}\nStatus: ${metadata.status}\n`,
+      ui.success(
+        `Created ${metadata.id} — ${metadata.title} (${metadata.status})`,
       );
     });
 
@@ -198,8 +241,8 @@ export function createProgram(): Command {
     .action(async (id: string, dependencyId: string) => {
       const root = await commandRoot(program);
       const result = await addWorkDependency(root, id, dependencyId);
-      process.stdout.write(
-        `Dependency added: ${result.id} needs ${result.dependencyId}\n`,
+      ui.success(
+        `Added dependency — ${result.id} needs ${result.dependencyId}`,
       );
     });
 
@@ -212,13 +255,13 @@ export function createProgram(): Command {
       const root = await commandRoot(program);
       const result = await removeWorkDependency(root, id, dependencyId);
       if (!result.changed) {
-        process.stdout.write(
-          `Dependency unchanged: ${result.id} does not need ${result.dependencyId}\nNo changes made.\n`,
+        ui.success(
+          `Dependency is already absent — ${result.id} does not need ${result.dependencyId}`,
         );
         return;
       }
-      process.stdout.write(
-        `Dependency removed: ${result.id} no longer needs ${result.dependencyId}\n`,
+      ui.success(
+        `Removed dependency — ${result.id} no longer needs ${result.dependencyId}`,
       );
     });
 
@@ -233,8 +276,8 @@ export function createProgram(): Command {
     .action(async (id: string, checks: string[]) => {
       const root = await commandRoot(program);
       const metadata = await confirmWork(root, id, checks);
-      process.stdout.write(
-        `Confirmed: ${metadata.id} ${checks.map((check) => check.toLowerCase()).join(", ")}\n`,
+      ui.success(
+        `Confirmed ${metadata.id} — ${checks.map((check) => check.toLowerCase()).join(", ")}`,
       );
     });
 
@@ -246,12 +289,10 @@ export function createProgram(): Command {
       const root = await commandRoot(program);
       const result = await syncWorkOverview(root, id);
       if (!result.changed) {
-        process.stdout.write(
-          `Overview current: ${result.id} ${result.path}\nNo changes made.\n`,
-        );
+        ui.success(`Overview is current for ${result.id} — ${result.path}`);
         return;
       }
-      process.stdout.write(`Synced: ${result.id} ${result.path}\n`);
+      ui.success(`Synced ${result.id} — ${result.path}`);
     });
 
   addTransitionOptions(
@@ -281,18 +322,15 @@ export function createProgram(): Command {
         const root = await commandRoot(program);
         if (options.dryRun) {
           const preview = await previewDiscard(root, id);
-          process.stdout.write(`Discard preview: ${preview.id}\n`);
-          for (const file of preview.files) {
-            process.stdout.write(`- ${file}\n`);
-          }
-          if (preview.referencedBy.length > 0) {
-            process.stdout.write(
-              `Referenced by: ${preview.referencedBy.join(", ")}\n`,
-            );
-          }
-          process.stdout.write(
-            `Trash target: ${preview.trashTarget}\nNo changes made.\n`,
+          ui.info(`Discard preview for ${preview.id}`);
+          ui.rows(
+            preview.files.map((file) => ({ label: "File", detail: file })),
           );
+          if (preview.referencedBy.length > 0) {
+            ui.warning(`Referenced by ${preview.referencedBy.join(", ")}`);
+          }
+          ui.rows([{ label: "Trash target", detail: preview.trashTarget }]);
+          ui.summary("No changes made");
           return;
         }
         if (!options.confirm) {
@@ -306,9 +344,8 @@ export function createProgram(): Command {
           id,
           options.confirm.toUpperCase(),
         );
-        process.stdout.write(
-          `Discarded: ${id.toUpperCase()}\nRecovery location: ${trashPath}\n`,
-        );
+        ui.success(`Discarded ${id.toUpperCase()}`);
+        ui.rows([{ label: "Recovery", detail: trashPath }]);
       },
     );
 
@@ -320,7 +357,7 @@ export function createProgram(): Command {
     .action(async () => {
       const root = await commandRoot(program);
       await rebuildViews(root);
-      process.stdout.write("Views rebuilt\n");
+      ui.success("Views rebuilt");
     });
 
   program
@@ -330,16 +367,16 @@ export function createProgram(): Command {
       const root = await commandRoot(program);
       const issues = await validateWorkspace(root);
       if (issues.length === 0) {
-        process.stdout.write("Check passed\n");
+        ui.success("Check passed");
         return;
       }
       for (const issue of issues) {
-        process.stderr.write(
-          `[${issue.code}] ${issue.path}: ${issue.message}\n`,
-        );
-        if (issue.hint) {
-          process.stderr.write(`  Fix: ${issue.hint}\n`);
-        }
+        ui.error({
+          code: issue.code,
+          path: issue.path,
+          message: issue.message,
+          ...(issue.hint ? { hint: issue.hint } : {}),
+        });
       }
       process.exitCode = 1;
     });
@@ -409,34 +446,41 @@ function writeMoveResult(
     applied: result.applied,
   };
   if (options.json) {
-    process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+    ui.json(output, true);
     return;
   }
 
-  process.stdout.write(
-    `${options.dryRun ? "Move preview" : "Moved"}: ${result.id} ${result.from} -> ${result.to}\n`,
-  );
+  const headline = `${result.id} — ${result.from} → ${result.to}`;
+  if (options.dryRun) ui.info(`Move preview for ${headline}`);
+  else ui.success(`Moved ${headline}`);
   if (result.missingInputs.length > 0) {
-    process.stdout.write("Questions:\n");
-    for (const input of result.missingInputs) {
-      const option = input.option ? `${input.option}: ` : "";
-      process.stdout.write(`- ${option}${input.question}\n`);
-    }
+    ui.section("Questions");
+    ui.rows(
+      result.missingInputs.map((input) => ({
+        status: "warning",
+        label: input.option ?? "Required",
+        detail: input.question,
+      })),
+    );
   }
   if (result.changes.length > 0) {
-    process.stdout.write("Changes:\n");
-    for (const change of result.changes) {
-      process.stdout.write(`- ${change}\n`);
-    }
+    ui.section("Changes");
+    ui.rows(
+      result.changes.map((change) => ({
+        status: "update",
+        label: "Change",
+        detail: change,
+      })),
+    );
   }
   if (result.warnings.length > 0) {
-    process.stdout.write("Warnings:\n");
+    ui.section("Warnings");
     for (const warning of result.warnings) {
-      process.stdout.write(`- ${warning}\n`);
+      ui.warning(warning);
     }
   }
   if (options.dryRun) {
-    process.stdout.write("No changes made.\n");
+    ui.summary("No changes made");
   }
 }
 
@@ -446,12 +490,12 @@ export async function run(argv = process.argv): Promise<void> {
     await program.parseAsync(argv);
   } catch (error) {
     if (error instanceof WorkspaceError) {
-      process.stderr.write(`[${error.code}] ${error.message}\n`);
+      ui.error({ code: error.code, message: error.message });
       process.exitCode = 2;
       return;
     }
     const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`[AIO-UNEXPECTED] ${message}\n`);
+    ui.error({ code: "AIO-UNEXPECTED", message });
     process.exitCode = 2;
   }
 }
@@ -483,7 +527,7 @@ async function readStandardInput(): Promise<string> {
 }
 
 function writeHookOutput(output: Record<string, unknown>): void {
-  process.stdout.write(`${JSON.stringify(output)}\n`);
+  ui.json(output);
 }
 
 function errorMessage(error: unknown): string {

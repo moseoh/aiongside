@@ -39,6 +39,23 @@ node packages/cli/dist/bin.js --root ./example work new "First Work"
 node packages/cli/dist/bin.js --root ./example check
 ```
 
+## CLI output
+
+The default output is designed for people. Commands use the same small status vocabulary: `✓` success, `•` information, `+` creation, `~` update, `!` warning, `×` error, and `→` next action. A successful initialization starts with the result, groups the created integration files, and ends with the next command:
+
+```text
+✓ Workspace initialized
+  • Root          /path/to/workspace
+  • ID prefix     WORK
+  + Agent Skills  .agents/skills/aiongside/SKILL.md · .claude/skills/aiongside/SKILL.md
+  + Instructions  .aiongside/instructions.md
+  + Hooks         .claude/settings.json · .codex/hooks.json
+! Approve project Hooks in Claude Code or Codex CLI when prompted. AIongside does not change user trust settings.
+→ Create your first work: aiongside --root "/path/to/workspace" work new "First Work"
+```
+
+Colors are used only in a terminal and never carry meaning by themselves. Pipes, captured output, and `NO_COLOR` receive the same text without ANSI codes. Automation should use documented `--json` output, Hook JSON, and exit codes instead of parsing human-readable prose. JSON output never includes headings, symbols, colors, or hints.
+
 ## Agent integration
 
 Claude Code and Codex CLI are the official MVP agent integrations. Other products may discover the generic Agent Skill, but AIongside does not guarantee their Hook execution or full workflow compliance. Support for other agents is only a possible later scope.
