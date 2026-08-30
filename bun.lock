@@ -14,7 +14,7 @@
     },
     "packages/cli": {
       "name": "aiongside",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "bin": {
         "aiongside": "./dist/bin.js",
       },

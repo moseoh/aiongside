@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import {
+  canonicalInstructionsPath,
+  canonicalSkillPath,
   createConsumerManifest,
   expectedPackageFiles,
   preparePackage,
@@ -16,11 +18,11 @@ import {
 test("creates public package metadata from the CLI manifest", async () => {
   const source = await readSourceManifest();
   validateSourceManifest(source);
-  assert.equal(source.version, "0.1.0");
+  assert.equal(source.version, "0.2.0");
 
   const consumer = createConsumerManifest(source);
   assert.equal(consumer.name, "aiongside");
-  assert.equal(consumer.version, "0.1.0");
+  assert.equal(consumer.version, "0.2.0");
   assert.deepEqual(consumer.bin, { aiongside: "./dist/bin.js" });
   assert.deepEqual(consumer.engines, { node: ">=22" });
   assert.deepEqual(consumer.repository, {
@@ -60,10 +62,24 @@ test("prepares only the public package files", async (context) => {
   const result = await validatePackageDirectory(stageDirectory);
 
   assert.deepEqual(result.files, expectedPackageFiles);
-  assert.equal(result.manifest.version, "0.1.0");
+  assert.equal(result.manifest.version, "0.2.0");
   assert.match(
     await readFile(path.join(stageDirectory, "dist", "bin.js"), "utf8"),
     /^#!\/usr\/bin\/env node/,
+  );
+  assert.equal(
+    await readFile(
+      path.join(stageDirectory, "skills", "aiongside", "SKILL.md"),
+      "utf8",
+    ),
+    await readFile(canonicalSkillPath, "utf8"),
+  );
+  assert.equal(
+    await readFile(
+      path.join(stageDirectory, "instructions", "aiongside.md"),
+      "utf8",
+    ),
+    await readFile(canonicalInstructionsPath, "utf8"),
   );
 });
 
@@ -98,7 +114,7 @@ test("rejects an unexpected tarball inventory", async () => {
       validatePackResult(
         {
           name: "aiongside",
-          version: "0.1.0",
+          version: "0.2.0",
           files: [
             ...expectedPackageFiles.map((file) => ({
               path: file,

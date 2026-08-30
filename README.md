@@ -9,15 +9,16 @@ The first goal is simple local work management. The second goal is a validation 
 - MVP CLI implemented.
 - Workspace initialization, work item creation, status movement, dependency management, cancellation, safe discard, and validation implemented.
 - Editable workspace templates implemented.
-- npm packaging and release validation implemented. The first npm release is pending.
+- Published on npm as `aiongside`.
 - TypeScript monorepo managed with Bun.
-- Shared Claude and Codex plugin source included.
+- Project-local Agent Skills, managed instructions, and lifecycle Hooks installed and validated by the CLI.
+- Record-body freshness tracking for human-readable Overviews implemented.
 - Local Web UI reserved for the distant future.
 - TUI excluded from product scope.
 
 ## Quick start
 
-After the first npm release, install AIongside with Node.js 22 or later:
+Install AIongside with Node.js 22 or later:
 
 ```sh
 npm install --global aiongside
@@ -28,7 +29,7 @@ aiongside --root ./example check
 
 The installed CLI runs on Node.js without requiring Bun. Node.js 22 and 24 are tested for every release candidate.
 
-To run from source before the first release:
+To run from source:
 
 ```sh
 bun install
@@ -37,6 +38,27 @@ node packages/cli/dist/bin.js init ./example
 node packages/cli/dist/bin.js --root ./example work new "First Work"
 node packages/cli/dist/bin.js --root ./example check
 ```
+
+## Agent integration
+
+Claude Code and Codex CLI are the official MVP agent integrations. Other products may discover the generic Agent Skill, but AIongside does not guarantee their Hook execution or full workflow compliance. Support for other agents is only a possible later scope.
+
+`aiongside init` installs the same managed Agent Skill in both supported project paths:
+
+```text
+.agents/skills/aiongside/SKILL.md
+.claude/skills/aiongside/SKILL.md
+```
+
+These files are generated from the skill included with the installed CLI. Do not edit them directly. Put workspace-specific instructions in `.aiongside/rules.md` and create separately named skills for unrelated procedures.
+
+The CLI also copies its always-on instructions to `.aiongside/instructions.md` and registers project-local `SessionStart` and `Stop` Hooks in `.claude/settings.json` and `.codex/hooks.json`. Session start injects the managed instructions and user rules. Session stop runs the same read-only validation as `aiongside check`; the first failure blocks completion and one retry reports remaining problems without blocking again.
+
+Claude Code or Codex CLI may ask you to approve project Hooks. Review and approve the two `aiongside hook` commands in the agent product. AIongside does not change user trust settings or user-home configuration. If `aiongside` is no longer on `PATH`, reinstall the global CLI; Hooks never install or update packages automatically.
+
+Use `aiongside skill sync` to restore the managed integration without a network connection. Use `aiongside update` to check npm, preview and approve a global CLI update, and then sync the current workspace with the newly installed CLI. Existing `AGENTS.md` and `CLAUDE.md` files are never created or modified. Older workspaces may retain an AIongside block previously added to either file; after approving the project Hooks, remove that old block manually if desired.
+
+See [MVP agent integration](docs/mvp.md) for the support and ownership boundaries.
 
 ## Templates
 
@@ -68,7 +90,17 @@ views/
   closed.md
 ```
 
-`record.md` is the canonical work document. It owns status, progress, decisions, and outcomes. `overview.md` is the short human-readable entry point and does not duplicate dynamic state. `plan.md` is optional and is created when a work item moves to `active`.
+`record.md` is the canonical work document. It owns status, progress, decisions, and outcomes. `overview.md` is the short human-readable entry point and does not duplicate dynamic state. Its machine-owned `recordBodyDigest` records which Record Markdown body was last reviewed. `plan.md` is optional and is created when a work item moves to `active`.
+
+After editing a Record Markdown body, review the Overview and update its human-readable content when needed. Then record that review explicitly:
+
+```sh
+aiongside work sync WORK-1
+```
+
+`aiongside check` reports `AIO-OVERVIEW-STALE` when the digest is missing or no longer matches. Record frontmatter and LF/CRLF differences do not affect this digest. Sync never generates or approves Overview prose.
+
+New workspaces use `WORK` as the default ID prefix. IDs start at `WORK-1`, have no leading zero, and are sorted by their numeric suffix in generated Views. A custom prefix remains available through `aiongside init --prefix <prefix>`. Padded IDs such as `AIO-001` are not supported or migrated automatically; see [Unreleased changes](CHANGELOG.md).
 
 Each new work item includes three user-owned content directories:
 
@@ -95,8 +127,8 @@ AIongside uses five statuses:
 Every status can move to every other status. Preview a move before applying it:
 
 ```sh
-aiongside work move AIO-001 waiting --dry-run --json
-aiongside work move AIO-001 waiting \
+aiongside work move WORK-1 waiting --dry-run --json
+aiongside work move WORK-1 waiting \
   --waiting-reason "Waiting for approval" \
   --resume-when "Approval is received"
 ```
@@ -106,9 +138,9 @@ The JSON preview lists stable `requiredInputs`, questions, CLI options, changes,
 Moving to `done` validates review signals stored in Record frontmatter. Confirm them after reviewing the corresponding Record content:
 
 ```sh
-aiongside work confirm AIO-001 scope completion
-aiongside work confirm AIO-001 verification
-aiongside work confirm AIO-001 outcome knowledge
+aiongside work confirm WORK-1 scope completion
+aiongside work confirm WORK-1 verification
+aiongside work confirm WORK-1 outcome knowledge
 ```
 
 - Only `done` requires `scope`, `completion`, `verification`, `outcome`, and `knowledge`.
@@ -119,8 +151,8 @@ aiongside work confirm AIO-001 outcome knowledge
 `needs` contains stable work item IDs in Record frontmatter. Manage it through the CLI instead of editing frontmatter directly:
 
 ```sh
-aiongside work needs add AIO-002 AIO-001
-aiongside work needs remove AIO-002 AIO-001
+aiongside work needs add WORK-2 WORK-1
+aiongside work needs remove WORK-2 WORK-1
 ```
 
 Adding a dependency rejects missing, duplicate, self-referencing, and cyclic relationships. Removing an absent relationship succeeds without changing files. Reopen `done` work before changing its dependencies. Confirmations are mechanical review signals; they do not prove that prose is true or complete.
@@ -129,8 +161,13 @@ Adding a dependency rejects missing, duplicate, self-referencing, and cyclic rel
 
 ```text
 aiongside init
+aiongside update
+aiongside skill sync
+aiongside hook session-start
+aiongside hook stop
 aiongside work new <title>
 aiongside work confirm <id> <checks...>
+aiongside work sync <id>
 aiongside work move <id> <status> --dry-run --json
 aiongside work move <id> <status> [transition options]
 aiongside work needs add <id> <dependency-id>

@@ -1,3 +1,5 @@
+export * from "./agent-hooks.js";
+export * from "./agent-skill.js";
 export * from "./frontmatter.js";
 export * from "./model.js";
 export * from "./templates.js";

@@ -1,5 +1,5 @@
 import { formatMarkdownDocument } from "./frontmatter.js";
-import type { WorkMetadata, WorkspaceConfig } from "./model.js";
+import type { WorkMetadata } from "./model.js";
 
 export const TEMPLATE_NAMES = ["record", "overview", "plan"] as const;
 
@@ -127,10 +127,16 @@ export function createRecordDocument(
 
 export function createOverviewDocument(
   metadata: WorkMetadata,
+  recordBodyDigest: string,
   template = TEMPLATE_DEFINITIONS.overview.contents,
 ): string {
   return formatMarkdownDocument(
-    { schema: 1, id: metadata.id, title: metadata.title },
+    {
+      schema: 1,
+      id: metadata.id,
+      title: metadata.title,
+      recordBodyDigest,
+    },
     renderTemplate(template, { title: metadata.title }),
   );
 }
@@ -143,25 +149,8 @@ export function createPlanDocument(
 }
 
 export function createRulesDocument(): string {
-  return `# AIongside work rules
+  return `# Workspace rules
 
-1. Read the relevant \`work/<ID>/record.md\` before starting work.
-2. Store outside material in \`references/\`, delivery outputs in \`deliverables/\`, and direct observations in \`evidence/\`.
-3. Create a work item with \`aiongside work new\`.
-4. Preview every status change with \`aiongside work move <ID> <status> --dry-run --json\`.
-5. Ask the user for every input listed in \`missingInputs\` and pass each answer through its explicit CLI option.
-6. Confirm completed checks with \`aiongside work confirm\` before moving to \`done\`.
-7. Manage dependencies with \`aiongside work needs add\` and \`aiongside work needs remove\`; do not edit \`needs\` in frontmatter directly.
-8. Reopen \`done\` work before changing its dependencies.
-9. Apply the status change with \`aiongside work move\`; use \`work cancel\` only as a cancellation alias.
-10. Run \`aiongside work discard <ID> --dry-run\` before discarding a work item.
-11. Run \`aiongside check\` before finishing work.
-`;
-}
-
-export function createAgentEntryDocument(config: WorkspaceConfig): string {
-  return `# ${config.name} work instructions
-
-Read and follow [.aiongside/rules.md](.aiongside/rules.md) before every task.
+Add workspace-specific instructions below. AIongside preserves this file during sync and update.
 `;
 }

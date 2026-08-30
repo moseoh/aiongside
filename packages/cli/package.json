@@ -1,6 +1,6 @@
 {
   "name": "aiongside",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A local-first workspace for people and AI",
   "license": "MIT",
   "repository": {
@@ -17,7 +17,9 @@
     "aiongside": "./dist/bin.js"
   },
   "files": [
-    "dist/bin.js"
+    "dist/bin.js",
+    "instructions/aiongside.md",
+    "skills/aiongside/SKILL.md"
   ],
   "publishConfig": {
     "access": "public",

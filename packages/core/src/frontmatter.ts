@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { parse, stringify } from "yaml";
 
 export class DocumentFormatError extends Error {
@@ -45,4 +46,30 @@ export function formatMarkdownDocument(
   const yaml = stringify(metadata, { lineWidth: 0 }).trimEnd();
   const normalizedBody = body.replaceAll("\r\n", "\n").trimEnd();
   return `---\n${yaml}\n---\n\n${normalizedBody}\n`;
+}
+
+export function calculateMarkdownBodyDigest(source: string): string {
+  const { body } = parseMarkdownDocument(source);
+  return createHash("sha256").update(body, "utf8").digest("hex");
+}
+
+export function replaceMarkdownMetadata(
+  source: string,
+  metadata: Record<string, unknown>,
+): string {
+  parseMarkdownDocument(source);
+  const delimiters = [...source.matchAll(/(^|\r?\n)---(?=\r?\n|$)/g)];
+  const closing = delimiters[1];
+  if (!closing || closing.index === undefined) {
+    throw new DocumentFormatError("Missing closing YAML frontmatter delimiter");
+  }
+
+  const prefixLength = closing[1]?.length ?? 0;
+  const closingStart = closing.index + prefixLength;
+  const suffix = source.slice(closingStart + 3);
+  const lineEnding = source.startsWith("---\r\n") ? "\r\n" : "\n";
+  const yaml = stringify(metadata, { lineWidth: 0 })
+    .trimEnd()
+    .replaceAll("\n", lineEnding);
+  return `---${lineEnding}${yaml}${lineEnding}---${suffix}`;
 }

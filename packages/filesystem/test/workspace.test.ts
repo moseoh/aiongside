@@ -9,10 +9,14 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
+  calculateMarkdownBodyDigest,
+  createOverviewDocument,
+  createRecordDocument,
   evaluateTransition,
   formatMarkdownDocument,
   parseMarkdownDocument,
   WORK_STATUSES,
+  workMetadataSchema,
 } from "@aiongside/core";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
@@ -23,12 +27,17 @@ import {
   discardWork,
   initializeWorkspace,
   listWorks,
+  loadAgentInstructionsSource,
+  loadAgentSkillSource,
+  mergeAgentHookSettings,
   moveWork,
   pathExists,
   previewDiscard,
   previewMoveWork,
   rebuildViews,
   removeWorkDependency,
+  syncAgentSkills,
+  syncWorkOverview,
   validateWorkspace,
 } from "../src/index.js";
 
@@ -77,6 +86,39 @@ async function setNeeds(
   await writeFile(recordPath, source.replace("needs: []", replacement));
 }
 
+async function writeWorkFixture(root: string, id: string): Promise<void> {
+  const metadata = workMetadataSchema.parse({
+    schema: 1,
+    id,
+    title: id,
+    status: "inbox",
+    type: "delivery",
+    created: "2026-08-30",
+    updated: "2026-08-30",
+    needs: [],
+    checks: {
+      scope: false,
+      completion: false,
+      verification: false,
+      outcome: false,
+      knowledge: false,
+    },
+  });
+  const directory = path.join(root, "work", id);
+  const record = createRecordDocument(metadata);
+  await mkdir(directory, { recursive: true });
+  await Promise.all([
+    writeFile(path.join(directory, "record.md"), record),
+    writeFile(
+      path.join(directory, "overview.md"),
+      createOverviewDocument(metadata, calculateMarkdownBodyDigest(record)),
+    ),
+    ...["references", "deliverables", "evidence"].map((name) =>
+      mkdir(path.join(directory, name)),
+    ),
+  ]);
+}
+
 const allChecks = [
   "scope",
   "completion",
@@ -94,6 +136,507 @@ const allTransitionInputs = {
 };
 
 describe("workspace lifecycle", () => {
+  test("merges managed Hooks without changing user settings or current output", () => {
+    const source = `${JSON.stringify(
+      {
+        permissions: { allow: ["Read"] },
+        hooks: {
+          Stop: [
+            {
+              hooks: [{ type: "command", command: "team stop" }],
+            },
+          ],
+        },
+      },
+      null,
+      2,
+    )}\n`;
+
+    const merged = mergeAgentHookSettings(source);
+    const settings = JSON.parse(merged) as {
+      permissions: { allow: string[] };
+      hooks: { SessionStart: unknown[]; Stop: unknown[] };
+    };
+
+    expect(settings.permissions.allow).toEqual(["Read"]);
+    expect(settings.hooks.SessionStart).toHaveLength(1);
+    expect(settings.hooks.Stop).toHaveLength(2);
+    expect(merged).toContain("team stop");
+    expect(mergeAgentHookSettings(merged)).toBe(merged);
+    const semanticallyCurrent = `${JSON.stringify({
+      hooks: {
+        Stop: [
+          {
+            hooks: [
+              {
+                command: "aiongside hook stop",
+                statusMessage: "Checking AIongside workspace",
+                timeout: 30,
+                type: "command",
+              },
+            ],
+          },
+        ],
+        SessionStart: [
+          {
+            hooks: [
+              {
+                command: "aiongside hook session-start",
+                statusMessage: "Loading AIongside instructions",
+                timeout: 10,
+                type: "command",
+              },
+            ],
+            matcher: "startup|resume|clear|compact",
+          },
+        ],
+      },
+    })}\n`;
+    expect(mergeAgentHookSettings(semanticallyCurrent)).toBe(
+      semanticallyCurrent,
+    );
+    expect(() => mergeAgentHookSettings('{"hooks":[]}\n')).toThrow(
+      "hooks property must be a JSON object",
+    );
+    expect(() =>
+      mergeAgentHookSettings(
+        '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"aiongside hook stop"}]}]}}\n',
+      ),
+    ).toThrow("registered under PreToolUse");
+  });
+
+  test("installs the managed Agent integration during initialization", async () => {
+    const root = await workspace();
+    const source = await loadAgentSkillSource();
+    const instructions = await loadAgentInstructionsSource();
+    const config = await readFile(
+      path.join(root, ".aiongside", "config.yaml"),
+      "utf8",
+    );
+
+    expect(config).toContain("agentSkillVersion: 4");
+    for (const target of [
+      path.join(root, ".agents", "skills", "aiongside", "SKILL.md"),
+      path.join(root, ".claude", "skills", "aiongside", "SKILL.md"),
+    ]) {
+      expect(await readFile(target, "utf8")).toBe(source);
+    }
+    expect(
+      await readFile(path.join(root, ".aiongside", "instructions.md"), "utf8"),
+    ).toBe(instructions);
+    for (const target of [
+      path.join(root, ".claude", "settings.json"),
+      path.join(root, ".codex", "hooks.json"),
+    ]) {
+      const hooks = await readFile(target, "utf8");
+      expect(mergeAgentHookSettings(hooks)).toBe(hooks);
+    }
+    expect(await pathExists(path.join(root, "AGENTS.md"))).toBe(false);
+    expect(await pathExists(path.join(root, "CLAUDE.md"))).toBe(false);
+  });
+
+  test("preserves existing Agent entry files and Hook settings on init", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "aiongside-test-"));
+    roots.push(root);
+    const agents = "# Team agents\n";
+    const claude = "# Team Claude instructions\n";
+    const settingsPath = path.join(root, ".claude", "settings.json");
+    const settings = `${JSON.stringify(
+      {
+        permissions: { allow: ["Read"] },
+        hooks: {
+          Stop: [{ hooks: [{ type: "command", command: "team stop" }] }],
+        },
+      },
+      null,
+      2,
+    )}\n`;
+    await writeFile(path.join(root, "AGENTS.md"), agents);
+    await writeFile(path.join(root, "CLAUDE.md"), claude);
+    await mkdir(path.dirname(settingsPath), { recursive: true });
+    await writeFile(settingsPath, settings);
+
+    await initializeWorkspace(root);
+
+    expect(await readFile(path.join(root, "AGENTS.md"), "utf8")).toBe(agents);
+    expect(await readFile(path.join(root, "CLAUDE.md"), "utf8")).toBe(claude);
+    const merged = await readFile(settingsPath, "utf8");
+    expect(merged).toContain("team stop");
+    expect(merged).toContain('"permissions"');
+  });
+
+  test("preflights missing, current, older, conflicting, and newer skill targets", async () => {
+    const source = await loadAgentSkillSource();
+
+    const olderRoot = await mkdtemp(path.join(tmpdir(), "aiongside-test-"));
+    roots.push(olderRoot);
+    const olderTarget = path.join(
+      olderRoot,
+      ".agents",
+      "skills",
+      "aiongside",
+      "SKILL.md",
+    );
+    await mkdir(path.dirname(olderTarget), { recursive: true });
+    await writeFile(
+      olderTarget,
+      source.replace('aiongside-version: "4"', 'aiongside-version: "3"'),
+    );
+    await initializeWorkspace(olderRoot);
+    expect(await readFile(olderTarget, "utf8")).toBe(source);
+    expect(
+      await readFile(
+        path.join(olderRoot, ".claude", "skills", "aiongside", "SKILL.md"),
+        "utf8",
+      ),
+    ).toBe(source);
+
+    const conflictRoot = await mkdtemp(path.join(tmpdir(), "aiongside-test-"));
+    roots.push(conflictRoot);
+    const conflictTarget = path.join(
+      conflictRoot,
+      ".claude",
+      "skills",
+      "aiongside",
+      "SKILL.md",
+    );
+    await mkdir(path.dirname(conflictTarget), { recursive: true });
+    await writeFile(conflictTarget, "# Team skill\n");
+    await expect(initializeWorkspace(conflictRoot)).rejects.toMatchObject({
+      code: "AIO-SKILL-CONFLICT",
+    });
+    expect(await readFile(conflictTarget, "utf8")).toBe("# Team skill\n");
+    expect(
+      await pathExists(path.join(conflictRoot, ".aiongside", "config.yaml")),
+    ).toBe(false);
+    expect(await pathExists(path.join(conflictRoot, "work"))).toBe(false);
+
+    const newerRoot = await mkdtemp(path.join(tmpdir(), "aiongside-test-"));
+    roots.push(newerRoot);
+    const newerTarget = path.join(
+      newerRoot,
+      ".agents",
+      "skills",
+      "aiongside",
+      "SKILL.md",
+    );
+    const newer = source.replace(
+      'aiongside-version: "4"',
+      'aiongside-version: "5"',
+    );
+    await mkdir(path.dirname(newerTarget), { recursive: true });
+    await writeFile(newerTarget, newer);
+    await expect(initializeWorkspace(newerRoot)).rejects.toMatchObject({
+      code: "AIO-SKILL-VERSION",
+    });
+    expect(await readFile(newerTarget, "utf8")).toBe(newer);
+    expect(
+      await pathExists(path.join(newerRoot, ".aiongside", "config.yaml")),
+    ).toBe(false);
+
+    const hookConflictRoot = await mkdtemp(
+      path.join(tmpdir(), "aiongside-test-"),
+    );
+    roots.push(hookConflictRoot);
+    const hookConflictTarget = path.join(
+      hookConflictRoot,
+      ".codex",
+      "hooks.json",
+    );
+    await mkdir(path.dirname(hookConflictTarget), { recursive: true });
+    await writeFile(hookConflictTarget, '{"hooks":[]}\n');
+    await expect(initializeWorkspace(hookConflictRoot)).rejects.toMatchObject({
+      code: "AIO-HOOK-CONFLICT",
+    });
+    expect(await readFile(hookConflictTarget, "utf8")).toBe('{"hooks":[]}\n');
+    expect(
+      await pathExists(
+        path.join(hookConflictRoot, ".aiongside", "config.yaml"),
+      ),
+    ).toBe(false);
+    expect(await pathExists(path.join(hookConflictRoot, "work"))).toBe(false);
+  });
+
+  test("registers legacy workspaces and keeps current sync byte-stable", async () => {
+    const root = await workspace();
+    const configPath = path.join(root, ".aiongside", "config.yaml");
+    const legacyConfig = (await readFile(configPath, "utf8")).replace(
+      "agentSkillVersion: 4\n",
+      "",
+    );
+    await writeFile(configPath, legacyConfig);
+    await rm(path.join(root, ".agents"), { recursive: true, force: true });
+    await rm(path.join(root, ".claude"), { recursive: true, force: true });
+
+    const registered = await syncAgentSkills(root);
+    expect(registered.changes).toEqual([
+      {
+        path: ".agents/skills/aiongside/SKILL.md",
+        action: "created",
+      },
+      {
+        path: ".claude/skills/aiongside/SKILL.md",
+        action: "created",
+      },
+      {
+        path: ".claude/settings.json",
+        action: "created",
+      },
+      { path: ".aiongside/config.yaml", action: "updated" },
+    ]);
+    const managedPaths = [
+      configPath,
+      path.join(root, ".agents", "skills", "aiongside", "SKILL.md"),
+      path.join(root, ".claude", "skills", "aiongside", "SKILL.md"),
+      path.join(root, ".aiongside", "instructions.md"),
+      path.join(root, ".claude", "settings.json"),
+      path.join(root, ".codex", "hooks.json"),
+    ];
+    const beforeNoOp = await Promise.all(
+      managedPaths.map((target) => readFile(target, "utf8")),
+    );
+    expect((await syncAgentSkills(root)).changes).toEqual([]);
+    expect(
+      await Promise.all(managedPaths.map((target) => readFile(target, "utf8"))),
+    ).toEqual(beforeNoOp);
+  });
+
+  test("updates older managed skills and refuses a newer configured version", async () => {
+    const root = await workspace();
+    const source = await loadAgentSkillSource();
+    const skillPath = path.join(
+      root,
+      ".agents",
+      "skills",
+      "aiongside",
+      "SKILL.md",
+    );
+    await writeFile(
+      skillPath,
+      source.replace('aiongside-version: "4"', 'aiongside-version: "3"'),
+    );
+    expect((await syncAgentSkills(root)).changes).toContainEqual({
+      path: ".agents/skills/aiongside/SKILL.md",
+      action: "updated",
+    });
+    expect(await readFile(skillPath, "utf8")).toBe(source);
+
+    const configPath = path.join(root, ".aiongside", "config.yaml");
+    await writeFile(
+      configPath,
+      (await readFile(configPath, "utf8")).replace(
+        "agentSkillVersion: 4",
+        "agentSkillVersion: 5",
+      ),
+    );
+    const before = await readFile(skillPath, "utf8");
+    await expect(syncAgentSkills(root)).rejects.toMatchObject({
+      code: "AIO-SKILL-VERSION",
+    });
+    expect(await readFile(skillPath, "utf8")).toBe(before);
+  });
+
+  test("rolls back all managed files when skill sync fails", async () => {
+    const root = await workspace();
+    const configPath = path.join(root, ".aiongside", "config.yaml");
+    const legacyConfig = (await readFile(configPath, "utf8")).replace(
+      "agentSkillVersion: 4\n",
+      "",
+    );
+    await writeFile(configPath, legacyConfig);
+    await rm(path.join(root, ".agents"), { recursive: true, force: true });
+    await rm(path.join(root, ".claude"), { recursive: true, force: true });
+    writeFailure.target = path.join(
+      root,
+      ".claude",
+      "skills",
+      "aiongside",
+      "SKILL.md",
+    );
+
+    await expect(syncAgentSkills(root)).rejects.toMatchObject({
+      code: "AIO-WRITE",
+    });
+    expect(await readFile(configPath, "utf8")).toBe(legacyConfig);
+    expect(
+      await pathExists(
+        path.join(root, ".agents", "skills", "aiongside", "SKILL.md"),
+      ),
+    ).toBe(false);
+    expect(
+      await pathExists(
+        path.join(root, ".claude", "skills", "aiongside", "SKILL.md"),
+      ),
+    ).toBe(false);
+  });
+
+  test("rolls back skills, instructions, and Hooks as one sync bundle", async () => {
+    const root = await workspace();
+    const agentsPath = path.join(
+      root,
+      ".agents",
+      "skills",
+      "aiongside",
+      "SKILL.md",
+    );
+    const claudeSkillPath = path.join(
+      root,
+      ".claude",
+      "skills",
+      "aiongside",
+      "SKILL.md",
+    );
+    const instructionsPath = path.join(root, ".aiongside", "instructions.md");
+    const codexHooksPath = path.join(root, ".codex", "hooks.json");
+    const changedInstructions = "# Locally changed managed instructions\n";
+    await rm(agentsPath);
+    await rm(claudeSkillPath);
+    await writeFile(instructionsPath, changedInstructions);
+    await rm(codexHooksPath);
+    writeFailure.target = codexHooksPath;
+
+    await expect(syncAgentSkills(root)).rejects.toMatchObject({
+      code: "AIO-WRITE",
+    });
+
+    expect(await pathExists(agentsPath)).toBe(false);
+    expect(await pathExists(claudeSkillPath)).toBe(false);
+    expect(await readFile(instructionsPath, "utf8")).toBe(changedInstructions);
+    expect(await pathExists(codexHooksPath)).toBe(false);
+  });
+
+  test("keeps user rules while repairing managed instructions and Hooks", async () => {
+    const root = await workspace();
+    const rulesPath = path.join(root, ".aiongside", "rules.md");
+    const instructionsPath = path.join(root, ".aiongside", "instructions.md");
+    const codexHooksPath = path.join(root, ".codex", "hooks.json");
+    const customRules = "# Team rules\n\nWrite updates in concise English.\n";
+    await writeFile(rulesPath, customRules);
+    await writeFile(instructionsPath, "# Changed managed instructions\n");
+    await rm(codexHooksPath);
+
+    const result = await syncAgentSkills(root);
+
+    expect(await readFile(rulesPath, "utf8")).toBe(customRules);
+    expect(await readFile(instructionsPath, "utf8")).toBe(
+      await loadAgentInstructionsSource(),
+    );
+    expect(result.changes).toEqual(
+      expect.arrayContaining([
+        { path: ".aiongside/instructions.md", action: "updated" },
+        { path: ".codex/hooks.json", action: "created" },
+      ]),
+    );
+  });
+
+  test("reports managed skill issues read-only, blocks work, and allows sync recovery", async () => {
+    const root = await workspace();
+    const source = await loadAgentSkillSource();
+    const agentsPath = path.join(
+      root,
+      ".agents",
+      "skills",
+      "aiongside",
+      "SKILL.md",
+    );
+    const claudePath = path.join(
+      root,
+      ".claude",
+      "skills",
+      "aiongside",
+      "SKILL.md",
+    );
+
+    await rm(agentsPath);
+    const missingBefore = await readFile(claudePath, "utf8");
+    expect(await validateWorkspace(root)).toContainEqual(
+      expect.objectContaining({
+        code: "AIO-SKILL-MISSING",
+        path: ".agents/skills/aiongside/SKILL.md",
+      }),
+    );
+    expect(await readFile(claudePath, "utf8")).toBe(missingBefore);
+    await expect(
+      createWork(root, "Blocked by skill damage"),
+    ).rejects.toMatchObject({
+      code: "AIO-WORKSPACE-INVALID",
+    });
+    await syncAgentSkills(root);
+
+    await writeFile(
+      agentsPath,
+      source.replace("license: MIT", "license: Unknown"),
+    );
+    expect(await validateWorkspace(root)).toContainEqual(
+      expect.objectContaining({ code: "AIO-SKILL-FORMAT" }),
+    );
+    await writeFile(agentsPath, source);
+
+    await writeFile(
+      agentsPath,
+      source.replace('aiongside-version: "4"', 'aiongside-version: "3"'),
+    );
+    expect(await validateWorkspace(root)).toContainEqual(
+      expect.objectContaining({ code: "AIO-SKILL-OUTDATED" }),
+    );
+    await syncAgentSkills(root);
+
+    const crlf = source.replaceAll("\n", "\r\n");
+    await writeFile(agentsPath, crlf);
+    expect(await validateWorkspace(root)).toContainEqual(
+      expect.objectContaining({
+        code: "AIO-SKILL-DRIFT",
+        path: ".agents/skills/aiongside/SKILL.md",
+      }),
+    );
+    expect(await readFile(agentsPath, "utf8")).toBe(crlf);
+    await syncAgentSkills(root);
+    expect(await readFile(agentsPath, "utf8")).toBe(source);
+
+    const instructionsPath = path.join(root, ".aiongside", "instructions.md");
+    await rm(instructionsPath);
+    const beforeInstructionsCheck = await readFile(claudePath, "utf8");
+    expect(await validateWorkspace(root)).toContainEqual(
+      expect.objectContaining({
+        code: "AIO-INSTRUCTIONS-MISSING",
+        path: ".aiongside/instructions.md",
+      }),
+    );
+    expect(await readFile(claudePath, "utf8")).toBe(beforeInstructionsCheck);
+    await expect(
+      createWork(root, "Blocked by instruction damage"),
+    ).rejects.toMatchObject({ code: "AIO-WORKSPACE-INVALID" });
+    await syncAgentSkills(root);
+
+    await writeFile(instructionsPath, "# Drifted instructions\n");
+    expect(await validateWorkspace(root)).toContainEqual(
+      expect.objectContaining({ code: "AIO-INSTRUCTIONS-DRIFT" }),
+    );
+    await syncAgentSkills(root);
+
+    const codexHooksPath = path.join(root, ".codex", "hooks.json");
+    await rm(codexHooksPath);
+    expect(await validateWorkspace(root)).toContainEqual(
+      expect.objectContaining({
+        code: "AIO-HOOK-MISSING",
+        path: ".codex/hooks.json",
+      }),
+    );
+    await syncAgentSkills(root);
+
+    await writeFile(codexHooksPath, "{}\n");
+    const hookBeforeCheck = await readFile(codexHooksPath, "utf8");
+    expect(await validateWorkspace(root)).toContainEqual(
+      expect.objectContaining({
+        code: "AIO-HOOK-DRIFT",
+        path: ".codex/hooks.json",
+      }),
+    );
+    expect(await readFile(codexHooksPath, "utf8")).toBe(hookBeforeCheck);
+    await syncAgentSkills(root);
+    expect(await validateWorkspace(root)).toEqual([]);
+  });
+
   test("handles initialization, creation, movement, and cancellation", async () => {
     const root = await workspace();
     const created = await createWork(root, "First Work");
@@ -115,7 +658,7 @@ describe("workspace lifecycle", () => {
       cancellationReason: "No longer needed",
     });
 
-    expect(created.id).toBe("AIO-001");
+    expect(created.id).toBe("AIO-1");
     expect(active.metadata.status).toBe("active");
     expect(cancelled.metadata.status).toBe("cancelled");
     expect(
@@ -136,10 +679,156 @@ describe("workspace lifecycle", () => {
     ]);
 
     expect(records.map((record) => record.id).sort()).toEqual([
-      "AIO-001",
-      "AIO-002",
-      "AIO-003",
+      "AIO-1",
+      "AIO-2",
+      "AIO-3",
     ]);
+  });
+
+  test("uses WORK by default and preserves a custom ID prefix", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "aiongside-default-id-"));
+    roots.push(root);
+
+    const config = await initializeWorkspace(root, { name: "Default" });
+    const created = await createWork(root, "Default prefix");
+
+    expect(config.idPrefix).toBe("WORK");
+    expect(created.id).toBe("WORK-1");
+
+    const customRoot = await mkdtemp(
+      path.join(tmpdir(), "aiongside-custom-id-"),
+    );
+    roots.push(customRoot);
+    const custom = await initializeWorkspace(customRoot, {
+      name: "Custom",
+      idPrefix: "OPS",
+    });
+    expect(custom.idPrefix).toBe("OPS");
+    expect((await createWork(customRoot, "Custom prefix")).id).toBe("OPS-1");
+  });
+
+  test("allocates unpadded arbitrary-size IDs and sorts them numerically", async () => {
+    const root = await workspace();
+    for (const id of ["AIO-10", "AIO-2", "AIO-100", "AIO-1"]) {
+      await writeWorkFixture(root, id);
+    }
+    await rebuildViews(root);
+
+    expect((await listWorks(root)).map((work) => work.metadata.id)).toEqual([
+      "AIO-1",
+      "AIO-2",
+      "AIO-10",
+      "AIO-100",
+    ]);
+
+    await writeWorkFixture(root, "AIO-9007199254740993");
+    await rebuildViews(root);
+    expect((await createWork(root, "Beyond safe integer")).id).toBe(
+      "AIO-9007199254740994",
+    );
+  });
+
+  test("creates Overview freshness metadata and ignores Record metadata or CRLF changes", async () => {
+    const root = await workspace();
+    const work = await createWork(root, "Fresh overview");
+    const recordPath = path.join(root, "work", work.id, "record.md");
+    const overviewPath = path.join(root, "work", work.id, "overview.md");
+    const record = await readFile(recordPath, "utf8");
+    const overview = parseMarkdownDocument(await readFile(overviewPath, "utf8"))
+      .metadata as { recordBodyDigest?: string };
+
+    expect(overview.recordBodyDigest).toBe(calculateMarkdownBodyDigest(record));
+    await confirmWork(root, work.id, ["scope"]);
+    expect(await validateWorkspace(root)).toEqual([]);
+
+    const confirmed = await readFile(recordPath, "utf8");
+    await writeFile(recordPath, confirmed.replaceAll("\n", "\r\n"));
+    expect(await validateWorkspace(root)).toEqual([]);
+  });
+
+  test("reports stale Overview read-only and blocks ordinary mutations", async () => {
+    const root = await workspace();
+    const work = await createWork(root, "Stale overview");
+    const recordPath = path.join(root, "work", work.id, "record.md");
+    const overviewPath = path.join(root, "work", work.id, "overview.md");
+    await writeFile(
+      recordPath,
+      `${await readFile(recordPath, "utf8")}New confirmed context.\n`,
+    );
+    const before = await Promise.all([
+      readFile(recordPath, "utf8"),
+      readFile(overviewPath, "utf8"),
+    ]);
+
+    expect(await validateWorkspace(root)).toContainEqual(
+      expect.objectContaining({
+        code: "AIO-OVERVIEW-STALE",
+        path: `work/${work.id}/overview.md#recordBodyDigest`,
+        hint: expect.stringContaining(`work sync ${work.id}`),
+      }),
+    );
+    await expect(confirmWork(root, work.id, ["scope"])).rejects.toMatchObject({
+      code: "AIO-WORKSPACE-INVALID",
+      message: expect.stringContaining("AIO-OVERVIEW-STALE"),
+    });
+    expect(
+      await Promise.all([
+        readFile(recordPath, "utf8"),
+        readFile(overviewPath, "utf8"),
+      ]),
+    ).toEqual(before);
+  });
+
+  test("syncs stale Overviews one at a time and preserves Overview body bytes", async () => {
+    const root = await workspace();
+    const first = await createWork(root, "First stale overview");
+    const second = await createWork(root, "Second stale overview");
+    const firstRecord = path.join(root, "work", first.id, "record.md");
+    const secondRecord = path.join(root, "work", second.id, "record.md");
+    const firstOverview = path.join(root, "work", first.id, "overview.md");
+    const overviewWithCrlf = (await readFile(firstOverview, "utf8")).replaceAll(
+      "\n",
+      "\r\n",
+    );
+    await Promise.all([
+      writeFile(firstOverview, overviewWithCrlf),
+      writeFile(
+        firstRecord,
+        `${await readFile(firstRecord, "utf8")}First change.\n`,
+      ),
+      writeFile(
+        secondRecord,
+        `${await readFile(secondRecord, "utf8")}Second change.\n`,
+      ),
+    ]);
+    const originalBody = overviewWithCrlf.slice(
+      overviewWithCrlf.indexOf("\r\n---\r\n") + "\r\n---".length,
+    );
+
+    const synced = await syncWorkOverview(root, first.id);
+    const syncedOverview = await readFile(firstOverview, "utf8");
+    const syncedBody = syncedOverview.slice(
+      syncedOverview.indexOf("\r\n---\r\n") + "\r\n---".length,
+    );
+    expect(synced).toEqual({
+      id: first.id,
+      changed: true,
+      path: `work/${first.id}/overview.md`,
+    });
+    expect(syncedBody).toBe(originalBody);
+    expect(
+      (await validateWorkspace(root)).filter(
+        (issue) => issue.code === "AIO-OVERVIEW-STALE",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        path: `work/${second.id}/overview.md#recordBodyDigest`,
+      }),
+    ]);
+    expect(await syncWorkOverview(root, first.id)).toEqual(
+      expect.objectContaining({ changed: false }),
+    );
+    expect(await readFile(firstOverview, "utf8")).toBe(syncedOverview);
   });
 
   test("validates dependency targets, uniqueness, self-reference, and cycles", async () => {
@@ -521,6 +1210,8 @@ describe("workspace lifecycle", () => {
       expect.objectContaining({ code: "AIO-DONE-INVALIDATED" }),
     );
 
+    await syncWorkOverview(root, work.id);
+
     const reopened = await moveWork(root, work.id, "active", {
       reopenReason: "The verified result changed",
     });
@@ -543,6 +1234,37 @@ describe("workspace lifecycle", () => {
     await confirmWork(root, work.id, ["verification", "outcome", "knowledge"]);
     await moveWork(root, work.id, "done");
     expect(await validateWorkspace(root)).toEqual([]);
+  });
+
+  test("allows target done recovery during sync but blocks unrelated damage", async () => {
+    const root = await workspace();
+    const target = await createWork(root, "Target done work");
+    await confirmWork(root, target.id, [...allChecks]);
+    await moveWork(root, target.id, "done");
+    const recordPath = path.join(root, "work", target.id, "record.md");
+    await writeFile(
+      recordPath,
+      `${await readFile(recordPath, "utf8")}Changed while done.\n`,
+    );
+
+    expect(await syncWorkOverview(root, target.id)).toEqual(
+      expect.objectContaining({ changed: true }),
+    );
+    expect(await validateWorkspace(root)).toContainEqual(
+      expect.objectContaining({ code: "AIO-DONE-INVALIDATED" }),
+    );
+
+    const unrelated = await createWork(root, "Unrelated damage").catch(
+      () => undefined,
+    );
+    expect(unrelated).toBeUndefined();
+    await rm(path.join(root, "work", target.id, "evidence"), {
+      recursive: true,
+    });
+    await expect(syncWorkOverview(root, target.id)).rejects.toMatchObject({
+      code: "AIO-WORKSPACE-INVALID",
+      message: expect.stringContaining("AIO-STRUCTURE-EVIDENCE"),
+    });
   });
 
   test("detects every supporting file change after completion", async () => {
@@ -763,13 +1485,32 @@ describe("workspace lifecycle", () => {
     const record = await createWork(root, "Corruption test");
     const recordPath = path.join(root, "work", record.id, "record.md");
     const source = await readFile(recordPath, "utf8");
-    await writeFile(recordPath, source.replace("id: AIO-001", "id: AIO-999"));
+    await writeFile(recordPath, source.replace("id: AIO-1", "id: AIO-999"));
 
     const issues = await validateWorkspace(root);
 
     expect(
       issues.some((issue) => issue.code === "AIO-IDENTITY-DIRECTORY"),
     ).toBe(true);
+  });
+
+  test("reports padded work IDs as an identity format error", async () => {
+    const root = await workspace();
+    const work = await createWork(root, "Padded ID");
+    const sourceDirectory = path.join(root, "work", work.id);
+    const paddedDirectory = path.join(root, "work", "AIO-001");
+    await rename(sourceDirectory, paddedDirectory);
+    for (const name of ["record.md", "overview.md"]) {
+      const target = path.join(paddedDirectory, name);
+      await writeFile(
+        target,
+        (await readFile(target, "utf8")).replaceAll(work.id, "AIO-001"),
+      );
+    }
+
+    expect(await validateWorkspace(root)).toContainEqual(
+      expect.objectContaining({ code: "AIO-IDENTITY-FORMAT" }),
+    );
   });
 
   test("validates Knowledge structure independently from work structure", async () => {
@@ -943,14 +1684,14 @@ describe("workspace lifecycle", () => {
       (source: string) =>
         source
           .split("\n")
-          .filter((line) => !line.includes("AIO-001"))
+          .filter((line) => !line.includes("AIO-1"))
           .join("\n"),
       (source: string) =>
         `${source}| [AIO-999](../work/AIO-999/overview.md) | Invented | inbox | 2026-08-30 |\n`,
       (source: string) => {
         const lines = source.split("\n");
-        const first = lines.findIndex((line) => line.includes("AIO-001"));
-        const second = lines.findIndex((line) => line.includes("AIO-002"));
+        const first = lines.findIndex((line) => line.includes("AIO-1"));
+        const second = lines.findIndex((line) => line.includes("AIO-2"));
         [lines[first], lines[second]] = [
           lines[second] ?? "",
           lines[first] ?? "",

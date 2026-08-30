@@ -40,11 +40,14 @@ const isoDate = z
   );
 
 const isoTimestamp = z.string().datetime({ offset: true });
+const workId = z.string().regex(/^[A-Z][A-Z0-9]{1,7}-[1-9]\d*$/);
+const sha256Digest = z.string().regex(/^[a-f0-9]{64}$/);
 
 export const workspaceConfigSchema = z.object({
   schema: z.literal(1),
   name: z.string().trim().min(1),
   idPrefix: z.string().regex(/^[A-Z][A-Z0-9]{1,7}$/),
+  agentSkillVersion: z.number().int().positive().optional(),
 });
 
 export const workChecksSchema = z.object({
@@ -69,12 +72,12 @@ export const workTransitionSchema = z.object({
 
 export const completionSealSchema = z.object({
   completedAt: isoTimestamp,
-  digest: z.string().regex(/^[a-f0-9]{64}$/),
+  digest: sha256Digest,
 });
 
 export const workMetadataSchema = z.object({
   schema: z.literal(1),
-  id: z.string().regex(/^[A-Z][A-Z0-9]{1,7}-\d{3,}$/),
+  id: workId,
   title: z
     .string()
     .trim()
@@ -86,7 +89,7 @@ export const workMetadataSchema = z.object({
   type: z.enum(WORK_TYPES),
   created: isoDate,
   updated: isoDate,
-  needs: z.array(z.string().regex(/^[A-Z][A-Z0-9]{1,7}-\d{3,}$/)).default([]),
+  needs: z.array(workId).default([]),
   checks: workChecksSchema,
   transitions: z.array(workTransitionSchema).default([]),
   completionSeal: completionSealSchema.nullable().default(null),
@@ -94,8 +97,9 @@ export const workMetadataSchema = z.object({
 
 export const overviewMetadataSchema = z.object({
   schema: z.literal(1),
-  id: z.string().regex(/^[A-Z][A-Z0-9]{1,7}-\d{3,}$/),
+  id: workId,
   title: z.string().trim().min(1),
+  recordBodyDigest: sha256Digest.optional(),
 });
 
 export type WorkspaceConfig = z.infer<typeof workspaceConfigSchema>;
@@ -122,7 +126,19 @@ export function isWorkCheck(value: string): value is WorkCheck {
   return (WORK_CHECKS as readonly string[]).includes(value);
 }
 
-export function idNumber(id: string): number {
-  const match = /-(\d+)$/.exec(id);
-  return match ? Number.parseInt(match[1] ?? "", 10) : Number.MAX_SAFE_INTEGER;
+export function idNumber(id: string): bigint {
+  const match = /-([1-9]\d*)$/.exec(id);
+  return match ? BigInt(match[1] ?? "0") : 0n;
+}
+
+export function compareWorkIds(left: string, right: string): number {
+  const leftNumber = idNumber(left);
+  const rightNumber = idNumber(right);
+  if (leftNumber < rightNumber) {
+    return -1;
+  }
+  if (leftNumber > rightNumber) {
+    return 1;
+  }
+  return left.localeCompare(right);
 }

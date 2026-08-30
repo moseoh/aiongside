@@ -1,5 +1,12 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -21,8 +28,27 @@ async function tempRoot(): Promise<string> {
   return root;
 }
 
-async function cli(args: string[]) {
-  return execFileAsync(process.execPath, [bin, ...args], { encoding: "utf8" });
+async function cli(args: string[], input?: string) {
+  if (input === undefined) {
+    return execFileAsync(process.execPath, [bin, ...args], {
+      encoding: "utf8",
+    });
+  }
+  return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    const child = execFile(
+      process.execPath,
+      [bin, ...args],
+      { encoding: "utf8" },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(Object.assign(error, { stdout, stderr }));
+          return;
+        }
+        resolve({ stdout, stderr });
+      },
+    );
+    child.stdin?.end(input);
+  });
 }
 
 describe("CLI", () => {
@@ -37,6 +63,18 @@ describe("CLI", () => {
     expect((await cli(["--version"])).stdout).toBe(`${manifest.version}\n`);
   });
 
+  test("documents update and rejects it outside a workspace before network access", async () => {
+    const root = await tempRoot();
+    const help = await cli(["update", "--help"]);
+    expect(help.stdout).toContain("--yes");
+    expect(help.stdout).toContain("current workspace agent integration");
+
+    await expect(cli(["--root", root, "update"])).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining("AIO-WORKSPACE-NOT-FOUND"),
+    });
+  });
+
   test("runs initialization, creation, movement, and validation", async () => {
     const root = await tempRoot();
 
@@ -47,7 +85,7 @@ describe("CLI", () => {
       root,
       "work",
       "confirm",
-      "AIO-001",
+      "WORK-1",
       "scope",
       "completion",
     ]);
@@ -56,15 +94,15 @@ describe("CLI", () => {
       root,
       "work",
       "move",
-      "AIO-001",
+      "WORK-1",
       "active",
     ]);
     const checked = await cli(["--root", root, "check"]);
 
     expect(initialized.stdout).toContain("Initialized");
-    expect(created.stdout).toContain("AIO-001 First Work");
-    expect(confirmed.stdout).toContain("AIO-001 scope, completion");
-    expect(moved.stdout).toContain("AIO-001 inbox -> active");
+    expect(created.stdout).toContain("WORK-1 First Work");
+    expect(confirmed.stdout).toContain("WORK-1 scope, completion");
+    expect(moved.stdout).toContain("WORK-1 inbox -> active");
     expect(checked.stdout).toBe("Check passed\n");
   });
 
@@ -84,6 +122,38 @@ describe("CLI", () => {
     }
   });
 
+  test("documents and runs explicit Overview sync", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    await cli(["--root", root, "work", "new", "Review overview"]);
+    const help = await cli(["work", "--help"]);
+    const syncHelp = await cli(["work", "sync", "--help"]);
+    const recordPath = path.join(root, "work", "WORK-1", "record.md");
+    await writeFile(
+      recordPath,
+      `${await readFile(recordPath, "utf8")}New Record context.\n`,
+    );
+
+    const synced = await cli(["--root", root, "work", "sync", "WORK-1"]);
+    const unchanged = await cli(["--root", root, "work", "sync", "work-1"]);
+
+    expect(help.stdout).toContain("sync");
+    expect(syncHelp.stdout).toContain("Overview review");
+    expect(synced.stdout).toBe("Synced: WORK-1 work/WORK-1/overview.md\n");
+    expect(unchanged.stdout).toBe(
+      "Overview current: WORK-1 work/WORK-1/overview.md\nNo changes made.\n",
+    );
+    expect((await cli(["--root", root, "check"])).stdout).toBe(
+      "Check passed\n",
+    );
+    await expect(
+      cli(["--root", root, "work", "sync", "WORK-999"]),
+    ).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining("AIO-WORK-NOT-FOUND"),
+    });
+  });
+
   test("documents nested dependency commands", async () => {
     const help = await cli(["work", "needs", "--help"]);
     const addHelp = await cli(["work", "needs", "add", "--help"]);
@@ -93,6 +163,168 @@ describe("CLI", () => {
     expect(help.stdout).toContain("remove");
     expect(addHelp.stdout).toContain("<id> <dependency-id>");
     expect(removeHelp.stdout).toContain("<id> <dependency-id>");
+  });
+
+  test("documents and runs Agent Skill sync", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    const help = await cli(["skill", "sync", "--help"]);
+    expect(help.stdout).toContain("Restore managed agent integration");
+
+    const configPath = path.join(root, ".aiongside", "config.yaml");
+    await writeFile(
+      configPath,
+      (await readFile(configPath, "utf8")).replace(
+        "agentSkillVersion: 4\n",
+        "",
+      ),
+    );
+    await rm(path.join(root, ".agents"), { recursive: true, force: true });
+    await rm(path.join(root, ".claude"), { recursive: true, force: true });
+    const nested = path.join(root, "work", "nested");
+    await mkdir(nested, { recursive: true });
+
+    const synced = await cli(["--root", nested, "skill", "sync"]);
+    expect(synced.stdout).toContain("Agent integration synced (version 4)");
+    expect(synced.stdout).toContain(
+      "Created: .agents/skills/aiongside/SKILL.md",
+    );
+    expect(synced.stdout).toContain(
+      "Created: .claude/skills/aiongside/SKILL.md",
+    );
+    expect(synced.stdout).toContain("Created: .claude/settings.json");
+    expect(synced.stdout).toContain("Updated: .aiongside/config.yaml");
+    expect(synced.stdout).toContain("Approve project Hooks");
+
+    const noOp = await cli(["--root", root, "skill", "sync"]);
+    expect(noOp.stdout).toContain(
+      "Agent integration is current (version 4)\nNo changes made.\n",
+    );
+    expect(noOp.stdout).toContain("Approve project Hooks");
+  });
+
+  test("reports Agent Skill sync conflicts with exit code 2", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    const target = path.join(
+      root,
+      ".agents",
+      "skills",
+      "aiongside",
+      "SKILL.md",
+    );
+    await writeFile(target, "# Team-owned skill\n");
+
+    await expect(cli(["--root", root, "skill", "sync"])).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining("AIO-SKILL-CONFLICT"),
+    });
+  });
+
+  test("injects only managed instructions and user rules on session start", async () => {
+    const root = await tempRoot();
+    const initialized = await cli(["init", root]);
+    expect(initialized.stdout).toContain(".aiongside/instructions.md");
+    expect(initialized.stdout).toContain(".claude/settings.json");
+    expect(initialized.stdout).toContain(".codex/hooks.json");
+    expect(initialized.stdout).toContain("Approve project Hooks");
+    const rulesPath = path.join(root, ".aiongside", "rules.md");
+    const customRules = "# Workspace rules\n\nUse the team vocabulary.\n";
+    await writeFile(rulesPath, customRules);
+    await cli(["--root", root, "work", "new", "Do not preload this Record"]);
+    const nested = path.join(root, "work", "WORK-1");
+
+    const result = await cli(
+      ["hook", "session-start"],
+      JSON.stringify({ cwd: nested, hook_event_name: "SessionStart" }),
+    );
+    const output = JSON.parse(result.stdout) as {
+      hookSpecificOutput: {
+        hookEventName: string;
+        additionalContext: string;
+      };
+    };
+
+    expect(output.hookSpecificOutput.hookEventName).toBe("SessionStart");
+    expect(output.hookSpecificOutput.additionalContext).toContain(
+      "AIongside managed instructions",
+    );
+    expect(output.hookSpecificOutput.additionalContext).toContain(
+      "Use the team vocabulary.",
+    );
+    expect(output.hookSpecificOutput.additionalContext).not.toContain(
+      "Do not preload this Record",
+    );
+
+    await rm(path.join(root, ".aiongside", "instructions.md"));
+    const missing = await cli(
+      ["hook", "session-start"],
+      JSON.stringify({ cwd: root, hook_event_name: "SessionStart" }),
+    );
+    const missingOutput = JSON.parse(missing.stdout) as {
+      hookSpecificOutput: { additionalContext: string };
+    };
+    expect(missingOutput.hookSpecificOutput.additionalContext).toContain(
+      ".aiongside/instructions.md",
+    );
+    expect(missingOutput.hookSpecificOutput.additionalContext).toContain(
+      "aiongside skill sync",
+    );
+  });
+
+  test("allows a valid stop and blocks a failing check only once", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    const validEvent = JSON.stringify({
+      cwd: root,
+      hook_event_name: "Stop",
+      stop_hook_active: false,
+    });
+    expect((await cli(["hook", "stop"], validEvent)).stdout).toBe("{}\n");
+
+    const instructionsPath = path.join(root, ".aiongside", "instructions.md");
+    await rm(instructionsPath);
+    const blocked = JSON.parse(
+      (await cli(["hook", "stop"], validEvent)).stdout,
+    ) as { decision: string; reason: string };
+    expect(blocked.decision).toBe("block");
+    expect(blocked.reason).toContain("AIO-INSTRUCTIONS-MISSING");
+
+    const retryEvent = JSON.stringify({
+      cwd: root,
+      hook_event_name: "Stop",
+      stop_hook_active: true,
+    });
+    const retry = JSON.parse(
+      (await cli(["hook", "stop"], retryEvent)).stdout,
+    ) as { decision?: string; systemMessage: string };
+    expect(retry.decision).toBeUndefined();
+    expect(retry.systemMessage).toContain("AIO-INSTRUCTIONS-MISSING");
+    await expect(readFile(instructionsPath, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  test("rejects malformed Hook input without changing workspace files", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    const configPath = path.join(root, ".aiongside", "config.yaml");
+    const before = await readFile(configPath, "utf8");
+
+    await expect(cli(["hook", "stop"], "not-json")).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining("AIO-HOOK-INPUT"),
+    });
+    await expect(
+      cli(
+        ["hook", "session-start"],
+        JSON.stringify({ cwd: root, hook_event_name: "Stop" }),
+      ),
+    ).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining("AIO-HOOK-INPUT"),
+    });
+    expect(await readFile(configPath, "utf8")).toBe(before);
   });
 
   test("adds, removes, and safely repeats dependency commands", async () => {
@@ -107,25 +339,25 @@ describe("CLI", () => {
       "work",
       "needs",
       "add",
-      "aio-001",
-      "aio-002",
+      "work-1",
+      "work-2",
     ]);
-    expect(added.stdout).toBe("Dependency added: AIO-001 needs AIO-002\n");
+    expect(added.stdout).toBe("Dependency added: WORK-1 needs WORK-2\n");
     const removed = await cli([
       "--root",
       root,
       "work",
       "needs",
       "remove",
-      "AIO-001",
-      "AIO-002",
+      "WORK-1",
+      "WORK-2",
     ]);
     expect(removed.stdout).toBe(
-      "Dependency removed: AIO-001 no longer needs AIO-002\n",
+      "Dependency removed: WORK-1 no longer needs WORK-2\n",
     );
 
     const paths = [
-      path.join(root, "work", "AIO-001", "record.md"),
+      path.join(root, "work", "WORK-1", "record.md"),
       path.join(root, "views", "open.md"),
       path.join(root, "views", "closed.md"),
     ];
@@ -138,8 +370,8 @@ describe("CLI", () => {
       "work",
       "needs",
       "remove",
-      "AIO-001",
-      "AIO-002",
+      "WORK-1",
+      "WORK-2",
     ]);
 
     expect(noOp.stdout).toContain("Dependency unchanged");
@@ -159,9 +391,9 @@ describe("CLI", () => {
     await cli(["--root", root, "work", "new", "Prerequisite work"]);
 
     for (const [args, code] of [
-      [["AIO-999", "AIO-002"], "AIO-WORK-NOT-FOUND"],
-      [["AIO-001", "AIO-999"], "AIO-DEPENDENCY-MISSING"],
-      [["AIO-001", "AIO-001"], "AIO-DEPENDENCY-SELF"],
+      [["WORK-999", "WORK-2"], "AIO-WORK-NOT-FOUND"],
+      [["WORK-1", "WORK-999"], "AIO-DEPENDENCY-MISSING"],
+      [["WORK-1", "WORK-1"], "AIO-DEPENDENCY-SELF"],
     ] as const) {
       await expect(
         cli(["--root", root, "work", "needs", "add", ...args]),
@@ -171,15 +403,15 @@ describe("CLI", () => {
       });
     }
 
-    await cli(["--root", root, "work", "needs", "add", "AIO-001", "AIO-002"]);
+    await cli(["--root", root, "work", "needs", "add", "WORK-1", "WORK-2"]);
     await expect(
-      cli(["--root", root, "work", "needs", "add", "AIO-001", "AIO-002"]),
+      cli(["--root", root, "work", "needs", "add", "WORK-1", "WORK-2"]),
     ).rejects.toMatchObject({
       code: 2,
       stderr: expect.stringContaining("AIO-DEPENDENCY-DUPLICATE"),
     });
     await expect(
-      cli(["--root", root, "work", "needs", "add", "AIO-002", "AIO-001"]),
+      cli(["--root", root, "work", "needs", "add", "WORK-2", "WORK-1"]),
     ).rejects.toMatchObject({
       code: 2,
       stderr: expect.stringContaining("AIO-DEPENDENCY-CYCLE"),
@@ -192,12 +424,12 @@ describe("CLI", () => {
       "outcome",
       "knowledge",
     ];
-    for (const id of ["AIO-002", "AIO-001"]) {
+    for (const id of ["WORK-2", "WORK-1"]) {
       await cli(["--root", root, "work", "confirm", id, ...checks]);
       await cli(["--root", root, "work", "move", id, "done"]);
     }
     await expect(
-      cli(["--root", root, "work", "needs", "remove", "AIO-001", "AIO-002"]),
+      cli(["--root", root, "work", "needs", "remove", "WORK-1", "WORK-2"]),
     ).rejects.toMatchObject({
       code: 2,
       stderr: expect.stringContaining("AIO-DONE-SEALED"),
@@ -210,7 +442,7 @@ describe("CLI", () => {
     await cli(["--root", root, "work", "new", "Dependent work"]);
     await cli(["--root", root, "work", "new", "Prerequisite work"]);
     const paths = [
-      path.join(root, "work", "AIO-001", "record.md"),
+      path.join(root, "work", "WORK-1", "record.md"),
       path.join(root, "views", "open.md"),
       path.join(root, "views", "closed.md"),
     ];
@@ -222,7 +454,7 @@ describe("CLI", () => {
     await chmod(viewsDirectory, 0o555);
     try {
       await expect(
-        cli(["--root", root, "work", "needs", "add", "AIO-001", "AIO-002"]),
+        cli(["--root", root, "work", "needs", "add", "WORK-1", "WORK-2"]),
       ).rejects.toMatchObject({
         code: 2,
         stderr: expect.stringContaining("AIO-WRITE"),
@@ -240,7 +472,7 @@ describe("CLI", () => {
     const root = await tempRoot();
     await cli(["init", root]);
     await cli(["--root", root, "work", "new", "Wait for review"]);
-    const recordPath = path.join(root, "work", "AIO-001", "record.md");
+    const recordPath = path.join(root, "work", "WORK-1", "record.md");
     const before = await readFile(recordPath, "utf8");
 
     const preview = await cli([
@@ -248,7 +480,7 @@ describe("CLI", () => {
       root,
       "work",
       "move",
-      "AIO-001",
+      "WORK-1",
       "waiting",
       "--dry-run",
       "--json",
@@ -272,11 +504,11 @@ describe("CLI", () => {
     const root = await tempRoot();
     await cli(["init", root]);
     await cli(["--root", root, "work", "new", "Wait safely"]);
-    const recordPath = path.join(root, "work", "AIO-001", "record.md");
+    const recordPath = path.join(root, "work", "WORK-1", "record.md");
     const before = await readFile(recordPath, "utf8");
 
     await expect(
-      cli(["--root", root, "work", "move", "AIO-001", "waiting"]),
+      cli(["--root", root, "work", "move", "WORK-1", "waiting"]),
     ).rejects.toMatchObject({
       code: 2,
       stderr: expect.stringContaining("AIO-TRANSITION-INPUT"),
@@ -288,7 +520,7 @@ describe("CLI", () => {
       root,
       "work",
       "move",
-      "AIO-001",
+      "WORK-1",
       "waiting",
       "--waiting-reason",
       "Review is pending",
@@ -324,23 +556,23 @@ describe("CLI", () => {
           root,
           "work",
           "move",
-          "AIO-001",
+          "WORK-1",
           "cancelled",
           ...common,
         ])
       ).stdout,
     ) as Record<string, unknown>;
     const cancelled = JSON.parse(
-      (await cli(["--root", root, "work", "cancel", "AIO-002", ...common]))
+      (await cli(["--root", root, "work", "cancel", "WORK-2", ...common]))
         .stdout,
     ) as Record<string, unknown>;
 
     expect({ ...moved, id: "same" }).toEqual({ ...cancelled, id: "same" });
     expect(
-      await readFile(path.join(root, "work", "AIO-001", "record.md"), "utf8"),
+      await readFile(path.join(root, "work", "WORK-1", "record.md"), "utf8"),
     ).toContain("cancellationReason: No longer needed");
     expect(
-      await readFile(path.join(root, "work", "AIO-002", "record.md"), "utf8"),
+      await readFile(path.join(root, "work", "WORK-2", "record.md"), "utf8"),
     ).toContain("cancellationReason: No longer needed");
   });
 
@@ -349,12 +581,12 @@ describe("CLI", () => {
     await cli(["init", root]);
     await cli(["--root", root, "work", "new", "Foundation"]);
     await cli(["--root", root, "work", "new", "Dependent"]);
-    const dependentPath = path.join(root, "work", "AIO-002", "record.md");
+    const dependentPath = path.join(root, "work", "WORK-2", "record.md");
     await writeFile(
       dependentPath,
       (await readFile(dependentPath, "utf8")).replace(
         "needs: []",
-        "needs:\n  - AIO-001",
+        "needs:\n  - WORK-1",
       ),
     );
     const checks = [
@@ -364,7 +596,7 @@ describe("CLI", () => {
       "outcome",
       "knowledge",
     ];
-    for (const id of ["AIO-001", "AIO-002"]) {
+    for (const id of ["WORK-1", "WORK-2"]) {
       await cli(["--root", root, "work", "confirm", id, ...checks]);
       await cli(["--root", root, "work", "move", id, "done"]);
     }
@@ -374,7 +606,7 @@ describe("CLI", () => {
       root,
       "work",
       "move",
-      "AIO-001",
+      "WORK-1",
       "active",
       "--reopen-reason",
       "The result changed",
@@ -387,7 +619,7 @@ describe("CLI", () => {
     };
 
     expect(result.invalidatesCompletion).toBe(true);
-    expect(result.warnings.join("\n")).toContain("AIO-002");
+    expect(result.warnings.join("\n")).toContain("WORK-2");
     expect(result.changes.join("\n")).toContain(
       "Reset verification, outcome, and knowledge confirmations.",
     );
@@ -399,7 +631,7 @@ describe("CLI", () => {
     await cli(["--root", root, "work", "new", "Discard candidate"]);
 
     await expect(
-      cli(["--root", root, "work", "discard", "AIO-001"]),
+      cli(["--root", root, "work", "discard", "WORK-1"]),
     ).rejects.toMatchObject({
       code: 2,
       stderr: expect.stringContaining("AIO-DISCARD-DRY-RUN"),
@@ -410,7 +642,7 @@ describe("CLI", () => {
       root,
       "work",
       "discard",
-      "AIO-001",
+      "WORK-1",
       "--dry-run",
     ]);
     expect(preview.stdout).toContain("No changes made");
@@ -420,13 +652,13 @@ describe("CLI", () => {
       root,
       "work",
       "discard",
-      "AIO-001",
+      "WORK-1",
       "--confirm",
-      "AIO-001",
+      "WORK-1",
     ]);
-    expect(discarded.stdout).toContain("Discarded: AIO-001");
+    expect(discarded.stdout).toContain("Discarded: WORK-1");
     expect(discarded.stdout).toContain(
-      "Recovery location: .aiongside/trash/AIO-001-",
+      "Recovery location: .aiongside/trash/WORK-1-",
     );
   });
 

@@ -1,4 +1,4 @@
-import { idNumber, type WorkMetadata } from "./model.js";
+import { compareWorkIds, type WorkMetadata } from "./model.js";
 
 const STATUS_ORDER = [
   "active",
@@ -16,7 +16,7 @@ function renderTable(title: string, metadata: WorkMetadata[]): string {
   const sorted = [...metadata].sort((left, right) => {
     const status =
       STATUS_ORDER.indexOf(left.status) - STATUS_ORDER.indexOf(right.status);
-    return status || idNumber(left.id) - idNumber(right.id);
+    return status || compareWorkIds(left.id, right.id);
   });
   const rows = sorted.map(
     (item) =>

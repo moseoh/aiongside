@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import {
   chmod,
   copyFile,
@@ -31,8 +32,21 @@ export const expectedPackageFiles = [
   "LICENSE",
   "README.md",
   "dist/bin.js",
+  "instructions/aiongside.md",
   "package.json",
+  "skills/aiongside/SKILL.md",
 ];
+export const canonicalSkillPath = path.join(
+  repositoryRoot,
+  "skills",
+  "aiongside",
+  "SKILL.md",
+);
+export const canonicalInstructionsPath = path.join(
+  repositoryRoot,
+  "instructions",
+  "aiongside.md",
+);
 
 const semverPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 
@@ -147,9 +161,20 @@ export async function validatePackageDirectory(directory) {
   }
 
   const binPath = path.join(directory, "dist", "bin.js");
-  const [binSource, binMetadata] = await Promise.all([
+  const [
+    binSource,
+    binMetadata,
+    packagedSkill,
+    canonicalSkill,
+    packagedInstructions,
+    canonicalInstructions,
+  ] = await Promise.all([
     readFile(binPath, "utf8"),
     stat(binPath),
+    readFile(path.join(directory, "skills", "aiongside", "SKILL.md"), "utf8"),
+    readFile(canonicalSkillPath, "utf8"),
+    readFile(path.join(directory, "instructions", "aiongside.md"), "utf8"),
+    readFile(canonicalInstructionsPath, "utf8"),
   ]);
   requireValue(
     binSource.startsWith("#!/usr/bin/env node\n"),
@@ -158,6 +183,14 @@ export async function validatePackageDirectory(directory) {
   requireValue(
     (binMetadata.mode & 0o111) !== 0,
     "Package bin must be executable.",
+  );
+  requireValue(
+    packagedSkill === canonicalSkill,
+    "Packaged Agent Skill must match the canonical source exactly.",
+  );
+  requireValue(
+    packagedInstructions === canonicalInstructions,
+    "Packaged managed instructions must match the canonical source exactly.",
   );
 
   return { files, manifest };
@@ -189,6 +222,10 @@ export async function preparePackage({
 
   await rm(stageDirectory, { recursive: true, force: true });
   await mkdir(path.join(stageDirectory, "dist"), { recursive: true });
+  await mkdir(path.join(stageDirectory, "skills", "aiongside"), {
+    recursive: true,
+  });
+  await mkdir(path.join(stageDirectory, "instructions"), { recursive: true });
   await Promise.all([
     copyFile(
       path.join(repositoryRoot, "packages", "cli", "dist", "bin.js"),
@@ -201,6 +238,14 @@ export async function preparePackage({
     copyFile(
       path.join(repositoryRoot, "LICENSE"),
       path.join(stageDirectory, "LICENSE"),
+    ),
+    copyFile(
+      canonicalSkillPath,
+      path.join(stageDirectory, "skills", "aiongside", "SKILL.md"),
+    ),
+    copyFile(
+      canonicalInstructionsPath,
+      path.join(stageDirectory, "instructions", "aiongside.md"),
     ),
     writeFile(
       path.join(stageDirectory, "package.json"),
@@ -243,5 +288,3 @@ export async function packPackage({
     tarballPath: path.join(outputDirectory, result.filename),
   };
 }
-
-import { execFile } from "node:child_process";

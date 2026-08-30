@@ -1,6 +1,11 @@
 import { createRequire } from "node:module";
 import path from "node:path";
 import {
+  createSessionStartHookOutput,
+  createStopHookOutput,
+  parseAgentHookEvent,
+} from "@aiongside/core";
+import {
   addWorkDependency,
   cancelWork,
   confirmWork,
@@ -13,12 +18,21 @@ import {
   moveWork,
   previewDiscard,
   previewMoveWork,
+  readAgentSessionContext,
   rebuildViews,
   removeWorkDependency,
+  syncAgentSkills,
+  syncWorkOverview,
   validateWorkspace,
   WorkspaceError,
 } from "@aiongside/filesystem";
 import { Command, Option } from "commander";
+import {
+  confirmUpdate,
+  defaultRunProcess,
+  fetchLatestVersion,
+  performUpdate,
+} from "./update.js";
 
 const cliVersion = (
   createRequire(import.meta.url)("../package.json") as { version: string }
@@ -26,6 +40,29 @@ const cliVersion = (
 
 interface GlobalOptions {
   root?: string;
+}
+
+const HOOK_TRUST_NOTICE =
+  "Approve project Hooks in Claude Code or Codex CLI when prompted. AIongside does not change user trust settings.\n";
+
+function writeAgentSkillSyncResult(
+  result: Awaited<ReturnType<typeof syncAgentSkills>>,
+): void {
+  if (result.changes.length === 0) {
+    process.stdout.write(
+      `Agent integration is current (version ${result.version})\nNo changes made.\n`,
+    );
+    process.stdout.write(HOOK_TRUST_NOTICE);
+    return;
+  }
+  process.stdout.write(
+    `Agent integration synced (version ${result.version})\n`,
+  );
+  for (const change of result.changes) {
+    const label = change.action === "created" ? "Created" : "Updated";
+    process.stdout.write(`${label}: ${change.path}\n`);
+  }
+  process.stdout.write(HOOK_TRUST_NOTICE);
 }
 
 export function createProgram(): Command {
@@ -41,7 +78,7 @@ export function createProgram(): Command {
     .description("Create an AIongside workspace")
     .argument("[path]", "Directory to initialize", ".")
     .option("--name <name>", "Workspace name")
-    .option("--prefix <prefix>", "Work item ID prefix", "AIO")
+    .option("--prefix <prefix>", "Work item ID prefix", "WORK")
     .action(async (target, options: { name?: string; prefix: string }) => {
       const root = path.resolve(target);
       const config = await initializeWorkspace(root, {
@@ -49,7 +86,72 @@ export function createProgram(): Command {
         idPrefix: options.prefix,
       });
       process.stdout.write(
-        `Initialized: ${root}\nID prefix: ${config.idPrefix}\n`,
+        `Initialized: ${root}\nID prefix: ${config.idPrefix}\nManaged agent integration: .agents/skills/aiongside/SKILL.md, .claude/skills/aiongside/SKILL.md, .aiongside/instructions.md, .claude/settings.json, .codex/hooks.json\n`,
+      );
+      process.stdout.write(HOOK_TRUST_NOTICE);
+    });
+
+  program
+    .command("update")
+    .description("Update the CLI and current workspace agent integration")
+    .option("--yes", "Approve the displayed global npm update")
+    .action(async (options: { yes?: boolean }) => {
+      const root = await commandRoot(program);
+      await performUpdate(
+        {
+          root,
+          currentVersion: cliVersion,
+          ...(options.yes ? { yes: true } : {}),
+        },
+        {
+          getLatestVersion: fetchLatestVersion,
+          interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+          confirm: confirmUpdate,
+          runProcess: defaultRunProcess,
+          syncCurrent: async (workspaceRoot) => {
+            writeAgentSkillSyncResult(await syncAgentSkills(workspaceRoot));
+          },
+          write: (message) => process.stdout.write(message),
+        },
+      );
+    });
+
+  const skill = program
+    .command("skill")
+    .description("Manage the agent integration bundle");
+
+  skill
+    .command("sync")
+    .description("Restore managed agent integration from the installed CLI")
+    .action(async () => {
+      const root = await commandRoot(program);
+      const result = await syncAgentSkills(root);
+      writeAgentSkillSyncResult(result);
+    });
+
+  const hook = program
+    .command("hook")
+    .description("Run project lifecycle Hooks for supported AI agents");
+
+  hook
+    .command("session-start")
+    .description("Inject AIongside instructions into an agent session")
+    .action(async () => {
+      const event = parseHookInput(await readStandardInput(), "SessionStart");
+      const root = await findWorkspaceRoot(path.resolve(event.cwd));
+      const context = await readAgentSessionContext(root);
+      writeHookOutput(createSessionStartHookOutput(context));
+    });
+
+  hook
+    .command("stop")
+    .description("Validate the workspace before an agent session stops")
+    .action(async () => {
+      const event = parseHookInput(await readStandardInput(), "Stop");
+      const root = await findWorkspaceRoot(path.resolve(event.cwd));
+      const issues = await validateWorkspace(root);
+      writeHookOutput(
+        createStopHookOutput(issues, event.stop_hook_active === true),
       );
     });
 
@@ -134,6 +236,22 @@ export function createProgram(): Command {
       process.stdout.write(
         `Confirmed: ${metadata.id} ${checks.map((check) => check.toLowerCase()).join(", ")}\n`,
       );
+    });
+
+  work
+    .command("sync")
+    .description("Confirm Overview review against the current Record body")
+    .argument("<id>", "Work item ID")
+    .action(async (id: string) => {
+      const root = await commandRoot(program);
+      const result = await syncWorkOverview(root, id);
+      if (!result.changed) {
+        process.stdout.write(
+          `Overview current: ${result.id} ${result.path}\nNo changes made.\n`,
+        );
+        return;
+      }
+      process.stdout.write(`Synced: ${result.id} ${result.path}\n`);
     });
 
   addTransitionOptions(
@@ -343,4 +461,31 @@ async function commandRoot(program: Command): Promise<string> {
   return findWorkspaceRoot(
     options.root ? path.resolve(options.root) : process.cwd(),
   );
+}
+
+function parseHookInput(source: string, expected: "SessionStart" | "Stop") {
+  try {
+    return parseAgentHookEvent(source, expected);
+  } catch (error) {
+    throw new WorkspaceError(
+      `Invalid ${expected} Hook input: ${errorMessage(error)}`,
+      "AIO-HOOK-INPUT",
+    );
+  }
+}
+
+async function readStandardInput(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function writeHookOutput(output: Record<string, unknown>): void {
+  process.stdout.write(`${JSON.stringify(output)}\n`);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

@@ -1,6 +1,9 @@
 ---
 name: aiongside
-description: Manage local AIongside work Records and generated Views. Use when a workspace contains .aiongside/config.yaml or the user asks to initialize or operate an AIongside workspace.
+description: Manage local AIongside work records and generated views. Use when a workspace contains .aiongside/config.yaml or the user asks to initialize or operate an AIongside workspace.
+license: MIT
+metadata:
+  aiongside-version: "4"
 ---
 
 # AIongside
@@ -8,28 +11,45 @@ description: Manage local AIongside work Records and generated Views. Use when a
 ## Start
 
 1. Find the workspace root containing `.aiongside/config.yaml`.
-2. Read `.aiongside/rules.md` completely.
+2. Read `.aiongside/instructions.md` and `.aiongside/rules.md` completely.
 3. Read the relevant `work/<ID>/record.md` before changing a work item.
+
+Do not check for updates automatically. Run `aiongside update` only when the user explicitly asks to update AIongside.
 
 ## Commands
 
 - Initialize: `aiongside init`
+- Update the CLI and current workspace skill: `aiongside update`
+- Restore the managed agent integration from the installed CLI: `aiongside skill sync`
 - Create: `aiongside work new "<title>"`
 - Confirm reviewed gates: `aiongside work confirm <ID> <checks...>`
+- Confirm Overview review: `aiongside work sync <ID>`
 - Preview move: `aiongside work move <ID> <status> --dry-run --json`
 - Apply move: `aiongside work move <ID> <status> <required-options>`
 - Add dependency: `aiongside work needs add <ID> <dependency-ID>`
 - Remove dependency: `aiongside work needs remove <ID> <dependency-ID>`
 - Cancel alias: `aiongside work cancel <ID> --cancellation-reason "<reason>"`
 - Preview discard: `aiongside work discard <ID> --dry-run`
-- Rebuild generated Views: `aiongside view rebuild`
+- Rebuild generated views: `aiongside view rebuild`
 - Validate: `aiongside check`
 
-Use CLI commands for creation, status changes, confirmations, dependencies, and discard. Do not edit `needs` in Record frontmatter directly. Edit other Record metadata only when no command exists. Do not hand-create IDs or rewrite generated View files.
+Use CLI commands for creation, status changes, confirmations, dependencies, and discard. Do not edit `needs` in record frontmatter directly. Edit other record metadata only when no command exists. Do not hand-create IDs or rewrite generated view files.
 
-Before every status change, run the JSON dry-run. Read every entry in `missingInputs`, ask the user its `question`, and pass the answer through the listed `option`. Do not write transition reasons into the customizable Record body; the CLI stores them in machine-owned frontmatter.
+Before every status change, run the JSON dry-run. Read every entry in `missingInputs`, ask the user its `question`, and pass the answer through the listed `option`. Do not write transition reasons into the customizable record body. The CLI stores them in machine-owned frontmatter.
 
 Before moving to `done`, confirm `scope`, `completion`, `verification`, `outcome`, and `knowledge`. Dependencies in `needs` must be `done` only when the work item becomes `done`. Reopen `done` work before adding or removing a dependency.
+
+## Record and Overview
+
+`record.md` is the current source of work facts. `overview.md` is the short, stable entry point a person reads first.
+
+After changing the Markdown body of `record.md`:
+
+1. Read `overview.md` and compare it with the current Record.
+2. Update the Overview body when its purpose or stable summary is no longer accurate.
+3. Run `aiongside work sync <ID>` only after completing that review.
+
+Do not run sync without reviewing the Overview. Sync records the current Record body digest; it does not generate or approve Overview content.
 
 ## Supporting content
 

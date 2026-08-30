@@ -1,21 +1,33 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { mkdir, readdir, readFile, rename, rm, stat } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+} from "node:fs/promises";
 import path from "node:path";
 import {
-  createAgentEntryDocument,
+  CURRENT_AGENT_SKILL_VERSION,
+  calculateMarkdownBodyDigest,
+  compareWorkIds,
   createOverviewDocument,
   createPlanDocument,
   createRecordDocument,
   createRulesDocument,
   evaluateTransition,
   formatMarkdownDocument,
-  idNumber,
+  isExactAgentSkillSource,
   isMovableStatus,
   isWorkCheck,
   overviewMetadataSchema,
+  parseAgentSkill,
   parseMarkdownDocument,
   renderViews,
+  replaceMarkdownMetadata,
   TEMPLATE_DEFINITIONS,
   TEMPLATE_NAMES,
   type TemplateName,
@@ -34,14 +46,23 @@ import {
 import * as lockfile from "proper-lockfile";
 import writeFileAtomic from "write-file-atomic";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import {
+  AGENT_HOOK_PATHS,
+  AGENT_INSTRUCTIONS_PATH,
+  agentHookSettingsAreCurrent,
+  mergeAgentHookSettings,
+} from "./agent-integration.js";
 import { WorkspaceError } from "./errors.js";
 
 const CONFIG_PATH = path.join(".aiongside", "config.yaml");
 const WORK_DIR = "work";
 const OVERVIEW_NAME = "overview.md";
 const RECORD_NAME = "record.md";
-const AGENT_MARKER = ".aiongside/rules.md";
 const TEMPLATE_DIR = path.join(".aiongside", "templates");
+const AGENT_SKILL_PATHS = [
+  path.join(".agents", "skills", "aiongside", "SKILL.md"),
+  path.join(".claude", "skills", "aiongside", "SKILL.md"),
+] as const;
 const VIEW_PATHS = ["views/open.md", "views/closed.md"] as const;
 const SUPPORTING_CONTENT_DIRECTORIES = [
   { name: "references", code: "AIO-STRUCTURE-REFERENCES" },
@@ -81,6 +102,30 @@ export interface DependencyMutationResult {
   changed: boolean;
   needs: string[];
   metadata: WorkMetadata;
+}
+
+export interface SyncOverviewResult {
+  id: string;
+  changed: boolean;
+  path: string;
+}
+
+export interface AgentSkillChange {
+  path: string;
+  action: "created" | "updated";
+}
+
+export interface AgentSkillSyncResult {
+  version: number;
+  changes: AgentSkillChange[];
+}
+
+interface ManagedFilePlan {
+  relativePath: string;
+  target: string;
+  previous: string | undefined;
+  next: string;
+  write: boolean;
 }
 
 export async function pathExists(target: string): Promise<boolean> {
@@ -127,10 +172,23 @@ export async function initializeWorkspace(
     );
   }
 
+  const agentSkillSource = await loadAgentSkillSource();
+  const agentSkill = requireCurrentAgentSkill(agentSkillSource);
+  const agentInstructionsSource = await loadAgentInstructionsSource();
+  const skillPlan = await planAgentSkillTargets(root, agentSkillSource);
+  const instructionsPlan = await planAgentInstructionsTarget(
+    root,
+    agentInstructionsSource,
+    false,
+  );
+  const hookPlan = await planAgentHookTargets(root);
+  const integrationPlan = [...skillPlan, instructionsPlan, ...hookPlan];
+
   const config = workspaceConfigSchema.parse({
     schema: 1,
     name: options.name?.trim() || path.basename(root),
-    idPrefix: options.idPrefix?.trim().toUpperCase() || "AIO",
+    idPrefix: options.idPrefix?.trim().toUpperCase() || "WORK",
+    agentSkillVersion: agentSkill.version,
   });
 
   await mkdir(path.join(root, ".aiongside", "trash"), { recursive: true });
@@ -138,7 +196,6 @@ export async function initializeWorkspace(
   await mkdir(path.join(root, WORK_DIR), { recursive: true });
   await mkdir(path.join(root, "views"), { recursive: true });
   await mkdir(path.join(root, "knowledge"), { recursive: true });
-  await atomicWrite(configPath, stringifyYaml(config, { lineWidth: 0 }));
   await atomicWrite(
     path.join(root, ".aiongside", "rules.md"),
     createRulesDocument(),
@@ -155,8 +212,13 @@ export async function initializeWorkspace(
     "# Knowledge areas\n\n| Key | Display name |\n| --- | --- |\n",
   );
   await writeViews(root, []);
-  await ensureAgentEntry(root, "AGENTS.md", config);
-  await ensureAgentEntry(root, "CLAUDE.md", config);
+  await applyAgentIntegrationState(
+    root,
+    integrationPlan,
+    undefined,
+    stringifyYaml(config, { lineWidth: 0 }),
+    true,
+  );
   return config;
 }
 
@@ -191,6 +253,128 @@ export async function loadConfig(root: string): Promise<WorkspaceConfig> {
   return result.data;
 }
 
+export async function loadAgentSkillSource(): Promise<string> {
+  const candidates = [
+    new URL("../skills/aiongside/SKILL.md", import.meta.url),
+    new URL("../../../skills/aiongside/SKILL.md", import.meta.url),
+  ];
+  for (const candidate of candidates) {
+    try {
+      return await readFile(candidate, "utf8");
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+  throw new WorkspaceError(
+    "Cannot read the Agent Skill included with this CLI.",
+    "AIO-SKILL-FORMAT",
+  );
+}
+
+export async function loadAgentInstructionsSource(): Promise<string> {
+  const candidates = [
+    new URL("../instructions/aiongside.md", import.meta.url),
+    new URL("../../../instructions/aiongside.md", import.meta.url),
+  ];
+  for (const candidate of candidates) {
+    try {
+      return await readFile(candidate, "utf8");
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+  }
+  throw new WorkspaceError(
+    "Cannot read the managed instructions included with this CLI.",
+    "AIO-INSTRUCTIONS-FORMAT",
+  );
+}
+
+export async function readAgentSessionContext(root: string): Promise<string> {
+  const sections = [
+    {
+      heading: "AIongside managed instructions",
+      relativePath: AGENT_INSTRUCTIONS_PATH,
+      recovery: "Run `aiongside skill sync` to restore this managed file.",
+    },
+    {
+      heading: "Workspace rules",
+      relativePath: path.join(".aiongside", "rules.md"),
+      recovery: "Restore this user-owned file or add workspace rules manually.",
+    },
+  ];
+  const output: string[] = [];
+  for (const section of sections) {
+    output.push(`# ${section.heading}`);
+    const target = path.join(root, section.relativePath);
+    try {
+      output.push((await readFile(target, "utf8")).trimEnd());
+    } catch (error) {
+      output.push(
+        `Cannot read ${relative(root, target)}: ${errorMessage(error)}\n${section.recovery}`,
+      );
+    }
+  }
+  return `${output.join("\n\n")}\n`;
+}
+
+export async function syncAgentSkills(
+  root: string,
+): Promise<AgentSkillSyncResult> {
+  return withWorkspaceLock(root, async () => {
+    const source = await loadAgentSkillSource();
+    const skill = requireCurrentAgentSkill(source);
+    const instructionsSource = await loadAgentInstructionsSource();
+    const config = await loadConfig(root);
+    if (
+      config.agentSkillVersion !== undefined &&
+      config.agentSkillVersion > skill.version
+    ) {
+      throw new WorkspaceError(
+        `Workspace Agent Skill version ${config.agentSkillVersion} is newer than this CLI supports (${skill.version}). Update the CLI before syncing.`,
+        "AIO-SKILL-VERSION",
+      );
+    }
+
+    const skillPlan = await planAgentSkillTargets(root, source);
+    const instructionsPlan = await planAgentInstructionsTarget(
+      root,
+      instructionsSource,
+      config.agentSkillVersion !== undefined,
+    );
+    const hookPlan = await planAgentHookTargets(root);
+    const plan = [...skillPlan, instructionsPlan, ...hookPlan];
+    const configPath = path.join(root, CONFIG_PATH);
+    const previousConfig = await readFile(configPath, "utf8");
+    const nextConfig = workspaceConfigSchema.parse({
+      ...config,
+      agentSkillVersion: skill.version,
+    });
+    const writeConfig = config.agentSkillVersion !== skill.version;
+    await applyAgentIntegrationState(
+      root,
+      plan,
+      previousConfig,
+      stringifyYaml(nextConfig, { lineWidth: 0 }),
+      writeConfig,
+    );
+
+    const changes: AgentSkillChange[] = plan
+      .filter((target) => target.write)
+      .map((target) => ({
+        path: relative(root, target.target),
+        action: target.previous === undefined ? "created" : "updated",
+      }));
+    if (writeConfig) {
+      changes.push({ path: CONFIG_PATH, action: "updated" });
+    }
+    return { version: skill.version, changes };
+  });
+}
+
 export async function listWorks(root: string): Promise<LoadedWork[]> {
   const workRoot = path.join(root, WORK_DIR);
   const entries = await readdir(workRoot, { withFileTypes: true });
@@ -213,8 +397,8 @@ export async function listWorks(root: string): Promise<LoadedWork[]> {
       // Full validation reports these errors. Listing returns readable work items only.
     }
   }
-  return works.sort(
-    (left, right) => idNumber(left.metadata.id) - idNumber(right.metadata.id),
+  return works.sort((left, right) =>
+    compareWorkIds(left.metadata.id, right.metadata.id),
   );
 }
 
@@ -227,7 +411,7 @@ export async function createWork(
     const config = await loadConfig(root);
     const works = await listWorks(root);
     const next = await nextWorkNumber(root, config.idPrefix);
-    const id = `${config.idPrefix}-${String(next).padStart(3, "0")}`;
+    const id = `${config.idPrefix}-${next}`;
     const cleanTitle = title.trim();
     if (!cleanTitle || /[\r\n]/.test(cleanTitle)) {
       throw new WorkspaceError(
@@ -265,17 +449,16 @@ export async function createWork(
       readWorkspaceTemplate(root, "record"),
       readWorkspaceTemplate(root, "overview"),
     ]);
+    const recordSource = createRecordDocument(metadata, recordTemplate);
+    const recordBodyDigest = calculateMarkdownBodyDigest(recordSource);
     await mkdir(staging, { recursive: true });
     let moved = false;
     try {
       await Promise.all([
-        atomicWrite(
-          path.join(staging, RECORD_NAME),
-          createRecordDocument(metadata, recordTemplate),
-        ),
+        atomicWrite(path.join(staging, RECORD_NAME), recordSource),
         atomicWrite(
           path.join(staging, OVERVIEW_NAME),
-          createOverviewDocument(metadata, overviewTemplate),
+          createOverviewDocument(metadata, recordBodyDigest, overviewTemplate),
         ),
         ...SUPPORTING_CONTENT_DIRECTORIES.map(({ name }) =>
           mkdir(path.join(staging, name), { recursive: true }),
@@ -510,6 +693,60 @@ export async function confirmWork(
       nextChecks[check] = true;
     }
     return { ...metadata, checks: nextChecks };
+  });
+}
+
+export async function syncWorkOverview(
+  root: string,
+  id: string,
+): Promise<SyncOverviewResult> {
+  return withWorkspaceLock(root, async () => {
+    const normalizedId = id.trim().toUpperCase();
+    await assertMutationSafe(
+      root,
+      ["AIO-OVERVIEW-STALE"],
+      (issue) =>
+        issue.code === "AIO-DONE-INVALIDATED" &&
+        issueTouchesWork(issue, normalizedId),
+    );
+    const loaded = requireWork(await listWorks(root), normalizedId);
+    const overviewPath = path.join(root, WORK_DIR, normalizedId, OVERVIEW_NAME);
+    let overviewSource: string;
+    let document: ReturnType<typeof parseMarkdownDocument>;
+    try {
+      overviewSource = await readFile(overviewPath, "utf8");
+      document = parseMarkdownDocument(overviewSource);
+    } catch (error) {
+      throw new WorkspaceError(
+        `Cannot read Overview: ${errorMessage(error)}`,
+        "AIO-STRUCTURE-OVERVIEW",
+      );
+    }
+    const parsedOverview = overviewMetadataSchema.safeParse(document.metadata);
+    if (!parsedOverview.success) {
+      throw new WorkspaceError(
+        `Invalid Overview metadata: ${parsedOverview.error.issues.map((issue) => issue.message).join(", ")}`,
+        "AIO-SCHEMA-OVERVIEW",
+      );
+    }
+    const overview = parsedOverview.data;
+    const recordBodyDigest = calculateMarkdownBodyDigest(loaded.source);
+    const result = {
+      id: normalizedId,
+      changed: overview.recordBodyDigest !== recordBodyDigest,
+      path: relative(root, overviewPath),
+    };
+    if (!result.changed) {
+      return result;
+    }
+    await atomicWrite(
+      overviewPath,
+      replaceMarkdownMetadata(overviewSource, {
+        ...overview,
+        recordBodyDigest,
+      }),
+    );
+    return result;
   });
 }
 
@@ -749,6 +986,9 @@ export async function validateWorkspace(
   }
 
   issues.push(...(await validateWorkspaceTemplates(root)));
+  if (config.agentSkillVersion !== undefined) {
+    issues.push(...(await validateManagedAgentSkills(root, config)));
+  }
   issues.push(...(await validateKnowledgeStructure(root)));
 
   const workRoot = path.join(root, WORK_DIR);
@@ -794,8 +1034,10 @@ export async function validateWorkspace(
     }
 
     let document: ReturnType<typeof parseMarkdownDocument>;
+    let recordSource: string;
     try {
-      document = parseMarkdownDocument(await readFile(recordPath, "utf8"));
+      recordSource = await readFile(recordPath, "utf8");
+      document = parseMarkdownDocument(recordSource);
     } catch (error) {
       canCompareViews = false;
       canValidateRelations = false;
@@ -812,7 +1054,10 @@ export async function validateWorkspace(
       canValidateRelations = false;
       for (const issue of result.error.issues) {
         issues.push({
-          code: "AIO-SCHEMA-RECORD",
+          code:
+            issue.path.length === 1 && issue.path[0] === "id"
+              ? "AIO-IDENTITY-FORMAT"
+              : "AIO-SCHEMA-RECORD",
           path: `${relative(root, recordPath)}#${issue.path.join(".")}`,
           message: issue.message,
         });
@@ -824,10 +1069,17 @@ export async function validateWorkspace(
     loadedRecords.push({
       directory: entry.name,
       metadata,
-      source: formatMarkdownDocument(metadata, document.body),
+      source: recordSource,
     });
     if (hasOverview) {
-      issues.push(...(await validateOverview(root, overviewPath, metadata)));
+      issues.push(
+        ...(await validateOverview(
+          root,
+          overviewPath,
+          metadata,
+          calculateMarkdownBodyDigest(recordSource),
+        )),
+      );
     }
     if (!metadata.id.startsWith(`${config.idPrefix}-`)) {
       canValidateRelations = false;
@@ -1477,6 +1729,7 @@ async function validateOverview(
   root: string,
   overviewPath: string,
   expected: WorkMetadata,
+  recordBodyDigest: string,
 ): Promise<ValidationIssue[]> {
   try {
     const document = parseMarkdownDocument(
@@ -1503,6 +1756,17 @@ async function validateOverview(
         code: "AIO-IDENTITY-OVERVIEW-TITLE",
         path: relative(root, overviewPath),
         message: `Overview title does not match Record title: ${result.data.title} != ${expected.title}`,
+      });
+    }
+    if (result.data.recordBodyDigest !== recordBodyDigest) {
+      issues.push({
+        code: "AIO-OVERVIEW-STALE",
+        path: `${relative(root, overviewPath)}#recordBodyDigest`,
+        message:
+          result.data.recordBodyDigest === undefined
+            ? "Overview has not been reviewed against the current Record body."
+            : "Overview was reviewed against a different Record body.",
+        hint: `Review the Record and Overview, then run \`aiongside work sync ${expected.id}\`.`,
       });
     }
     return issues;
@@ -1632,24 +1896,445 @@ async function writeViews(
   }
 }
 
-async function ensureAgentEntry(
+function requireCurrentAgentSkill(source: string) {
+  let skill: ReturnType<typeof parseAgentSkill>;
+  try {
+    skill = parseAgentSkill(source);
+  } catch (error) {
+    throw new WorkspaceError(
+      `Invalid bundled Agent Skill: ${errorMessage(error)}`,
+      "AIO-SKILL-FORMAT",
+    );
+  }
+  if (skill.version !== CURRENT_AGENT_SKILL_VERSION) {
+    throw new WorkspaceError(
+      `Bundled Agent Skill version ${skill.version} does not match the CLI contract ${CURRENT_AGENT_SKILL_VERSION}.`,
+      "AIO-SKILL-FORMAT",
+    );
+  }
+  return skill;
+}
+
+async function planAgentSkillTargets(
   root: string,
-  name: string,
-  config: WorkspaceConfig,
-): Promise<void> {
-  const target = path.join(root, name);
-  if (!(await pathExists(target))) {
-    await atomicWrite(target, createAgentEntryDocument(config));
-    return;
+  expectedSource: string,
+): Promise<ManagedFilePlan[]> {
+  const expected = requireCurrentAgentSkill(expectedSource);
+  const result: ManagedFilePlan[] = [];
+  for (const relativePath of AGENT_SKILL_PATHS) {
+    await assertSafeManagedParents(root, relativePath, agentSkillConflict);
+    const target = path.join(root, relativePath);
+    let metadata: Awaited<ReturnType<typeof lstat>>;
+    try {
+      metadata = await lstat(target);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        result.push({
+          relativePath,
+          target,
+          previous: undefined,
+          next: expectedSource,
+          write: true,
+        });
+        continue;
+      }
+      throw error;
+    }
+    if (!metadata.isFile()) {
+      throw agentSkillConflict(root, target);
+    }
+
+    const previous = await readFile(target, "utf8");
+    if (isExactAgentSkillSource(previous, expectedSource)) {
+      result.push({
+        relativePath,
+        target,
+        previous,
+        next: expectedSource,
+        write: false,
+      });
+      continue;
+    }
+    let installed: ReturnType<typeof parseAgentSkill>;
+    try {
+      installed = parseAgentSkill(previous);
+    } catch {
+      throw agentSkillConflict(root, target);
+    }
+    if (installed.version > expected.version) {
+      throw new WorkspaceError(
+        `${relative(root, target)} uses Agent Skill version ${installed.version}, newer than this CLI supports (${expected.version}). Update the CLI before syncing.`,
+        "AIO-SKILL-VERSION",
+      );
+    }
+    result.push({
+      relativePath,
+      target,
+      previous,
+      next: expectedSource,
+      write: true,
+    });
   }
-  const current = await readFile(target, "utf8");
-  if (current.includes(AGENT_MARKER)) {
-    return;
-  }
-  await atomicWrite(
-    target,
-    `${current.trimEnd()}\n\n## AIongside\n\nRead [.aiongside/rules.md](.aiongside/rules.md) first.\n`,
+  return result;
+}
+
+async function planAgentInstructionsTarget(
+  root: string,
+  expectedSource: string,
+  managed: boolean,
+): Promise<ManagedFilePlan> {
+  await assertSafeManagedParents(
+    root,
+    AGENT_INSTRUCTIONS_PATH,
+    instructionsConflict,
   );
+  const target = path.join(root, AGENT_INSTRUCTIONS_PATH);
+  let metadata: Awaited<ReturnType<typeof lstat>>;
+  try {
+    metadata = await lstat(target);
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return {
+        relativePath: AGENT_INSTRUCTIONS_PATH,
+        target,
+        previous: undefined,
+        next: expectedSource,
+        write: true,
+      };
+    }
+    throw error;
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw instructionsConflict(root, target);
+  }
+  const previous = await readFile(target, "utf8");
+  if (previous === expectedSource) {
+    return {
+      relativePath: AGENT_INSTRUCTIONS_PATH,
+      target,
+      previous,
+      next: expectedSource,
+      write: false,
+    };
+  }
+  if (!managed) {
+    throw instructionsConflict(root, target);
+  }
+  return {
+    relativePath: AGENT_INSTRUCTIONS_PATH,
+    target,
+    previous,
+    next: expectedSource,
+    write: true,
+  };
+}
+
+async function planAgentHookTargets(root: string): Promise<ManagedFilePlan[]> {
+  const result: ManagedFilePlan[] = [];
+  for (const relativePath of AGENT_HOOK_PATHS) {
+    await assertSafeManagedParents(root, relativePath, hookConflict);
+    const target = path.join(root, relativePath);
+    let metadata: Awaited<ReturnType<typeof lstat>> | undefined;
+    try {
+      metadata = await lstat(target);
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+    if (metadata && (!metadata.isFile() || metadata.isSymbolicLink())) {
+      throw hookConflict(root, target);
+    }
+    const previous = metadata ? await readFile(target, "utf8") : undefined;
+    let next: string;
+    try {
+      next = mergeAgentHookSettings(previous);
+    } catch (error) {
+      throw hookConflict(root, target, errorMessage(error));
+    }
+    result.push({
+      relativePath,
+      target,
+      previous,
+      next,
+      write: previous !== next,
+    });
+  }
+  return result;
+}
+
+async function assertSafeManagedParents(
+  root: string,
+  relativePath: string,
+  conflict: (root: string, target: string) => WorkspaceError,
+): Promise<void> {
+  const parts = relativePath.split(path.sep).slice(0, -1);
+  let current = root;
+  for (const part of parts) {
+    current = path.join(current, part);
+    let metadata: Awaited<ReturnType<typeof lstat>>;
+    try {
+      metadata = await lstat(current);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        return;
+      }
+      throw error;
+    }
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw conflict(root, current);
+    }
+  }
+}
+
+function agentSkillConflict(root: string, target: string): WorkspaceError {
+  return new WorkspaceError(
+    `Cannot manage ${relative(root, target)} because it is not an AIongside-managed Agent Skill. Move it to a different name and run the command again.`,
+    "AIO-SKILL-CONFLICT",
+  );
+}
+
+function instructionsConflict(root: string, target: string): WorkspaceError {
+  return new WorkspaceError(
+    `Cannot manage ${relative(root, target)} because it contains user-owned content. Move custom instructions to .aiongside/rules.md and run the command again.`,
+    "AIO-INSTRUCTIONS-CONFLICT",
+  );
+}
+
+function hookConflict(
+  root: string,
+  target: string,
+  detail?: string,
+): WorkspaceError {
+  return new WorkspaceError(
+    `Cannot merge AIongside Hooks into ${relative(root, target)}${detail ? `: ${detail}` : "."}`,
+    "AIO-HOOK-CONFLICT",
+  );
+}
+
+async function applyAgentIntegrationState(
+  root: string,
+  plan: ManagedFilePlan[],
+  previousConfig: string | undefined,
+  nextConfig: string,
+  writeConfig: boolean,
+): Promise<void> {
+  const configPath = path.join(root, CONFIG_PATH);
+  try {
+    for (const target of plan) {
+      if (target.write) {
+        await atomicWrite(target.target, target.next);
+      }
+    }
+    if (writeConfig) {
+      await atomicWrite(configPath, nextConfig);
+    }
+  } catch (error) {
+    try {
+      for (const target of plan) {
+        if (!target.write) {
+          continue;
+        }
+        if (target.previous === undefined) {
+          await rm(target.target, { force: true });
+        } else {
+          await atomicWrite(target.target, target.previous);
+        }
+      }
+      if (writeConfig) {
+        if (previousConfig === undefined) {
+          await rm(configPath, { force: true });
+        } else {
+          await atomicWrite(configPath, previousConfig);
+        }
+      }
+    } catch (rollbackError) {
+      throw new WorkspaceError(
+        `Agent integration write failed and rollback also failed: ${errorMessage(error)}; ${errorMessage(rollbackError)}`,
+        "AIO-WRITE",
+      );
+    }
+    throw new WorkspaceError(
+      `Agent integration write failed: ${errorMessage(error)}`,
+      "AIO-WRITE",
+    );
+  }
+}
+
+async function validateManagedAgentSkills(
+  root: string,
+  config: WorkspaceConfig,
+): Promise<ValidationIssue[]> {
+  const issues: ValidationIssue[] = [];
+  let expectedSource: string;
+  let expectedInstructions: string;
+  let expected: ReturnType<typeof parseAgentSkill>;
+  try {
+    expectedSource = await loadAgentSkillSource();
+    expectedInstructions = await loadAgentInstructionsSource();
+    expected = requireCurrentAgentSkill(expectedSource);
+  } catch (error) {
+    return [
+      {
+        code:
+          error instanceof WorkspaceError
+            ? error.code
+            : "AIO-INSTRUCTIONS-FORMAT",
+        path:
+          error instanceof WorkspaceError &&
+          error.code === "AIO-INSTRUCTIONS-FORMAT"
+            ? "instructions/aiongside.md"
+            : "skills/aiongside/SKILL.md",
+        message: errorMessage(error),
+        hint: "Reinstall the AIongside CLI package.",
+      },
+    ];
+  }
+
+  if (config.agentSkillVersion !== expected.version) {
+    issues.push({
+      code: "AIO-SKILL-OUTDATED",
+      path: `${CONFIG_PATH}#agentSkillVersion`,
+      message: `Configured Agent Skill version ${config.agentSkillVersion} does not match CLI version ${expected.version}.`,
+      hint: "Run `aiongside skill sync`.",
+    });
+  }
+
+  for (const relativePath of AGENT_SKILL_PATHS) {
+    const target = path.join(root, relativePath);
+    let metadata: Awaited<ReturnType<typeof lstat>>;
+    try {
+      metadata = await lstat(target);
+    } catch (error) {
+      if (isNodeError(error) && error.code === "ENOENT") {
+        issues.push({
+          code: "AIO-SKILL-MISSING",
+          path: relative(root, target),
+          message: "Managed Agent Skill is missing.",
+          hint: "Run `aiongside skill sync`.",
+        });
+        continue;
+      }
+      throw error;
+    }
+    if (!metadata.isFile()) {
+      issues.push({
+        code: "AIO-SKILL-MISSING",
+        path: relative(root, target),
+        message: "Managed Agent Skill must be a regular file.",
+        hint: "Move the conflicting entry and run `aiongside skill sync`.",
+      });
+      continue;
+    }
+
+    let source: string;
+    try {
+      source = await readFile(target, "utf8");
+    } catch (error) {
+      issues.push({
+        code: "AIO-SKILL-FORMAT",
+        path: relative(root, target),
+        message: `Cannot read managed Agent Skill: ${errorMessage(error)}`,
+        hint: "Fix file access and run `aiongside skill sync`.",
+      });
+      continue;
+    }
+    let installed: ReturnType<typeof parseAgentSkill>;
+    try {
+      installed = parseAgentSkill(source);
+    } catch (error) {
+      issues.push({
+        code: "AIO-SKILL-FORMAT",
+        path: relative(root, target),
+        message: errorMessage(error),
+        hint: "Move the conflicting file and run `aiongside skill sync`.",
+      });
+      continue;
+    }
+    if (
+      installed.version !== expected.version ||
+      installed.version !== config.agentSkillVersion
+    ) {
+      issues.push({
+        code: "AIO-SKILL-OUTDATED",
+        path: relative(root, target),
+        message: `Managed Agent Skill version ${installed.version} does not match the configured CLI contract.`,
+        hint: "Run `aiongside skill sync`.",
+      });
+      continue;
+    }
+    if (!isExactAgentSkillSource(source, expectedSource)) {
+      issues.push({
+        code: "AIO-SKILL-DRIFT",
+        path: relative(root, target),
+        message: "Managed Agent Skill differs from the CLI source.",
+        hint: "Move custom instructions to .aiongside/rules.md and run `aiongside skill sync`.",
+      });
+    }
+  }
+
+  const instructionsPath = path.join(root, AGENT_INSTRUCTIONS_PATH);
+  let instructionsMetadata: Awaited<ReturnType<typeof lstat>> | undefined;
+  try {
+    instructionsMetadata = await lstat(instructionsPath);
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+  if (
+    !instructionsMetadata?.isFile() ||
+    instructionsMetadata.isSymbolicLink()
+  ) {
+    issues.push({
+      code: "AIO-INSTRUCTIONS-MISSING",
+      path: AGENT_INSTRUCTIONS_PATH,
+      message:
+        "Managed AIongside instructions are missing or not a regular file.",
+      hint: "Run `aiongside skill sync`.",
+    });
+  } else {
+    const instructions = await readFile(instructionsPath, "utf8");
+    if (instructions !== expectedInstructions) {
+      issues.push({
+        code: "AIO-INSTRUCTIONS-DRIFT",
+        path: AGENT_INSTRUCTIONS_PATH,
+        message: "Managed AIongside instructions differ from the CLI source.",
+        hint: "Move custom instructions to .aiongside/rules.md and run `aiongside skill sync`.",
+      });
+    }
+  }
+
+  for (const relativePath of AGENT_HOOK_PATHS) {
+    const target = path.join(root, relativePath);
+    let metadata: Awaited<ReturnType<typeof lstat>> | undefined;
+    try {
+      metadata = await lstat(target);
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+    if (!metadata?.isFile() || metadata.isSymbolicLink()) {
+      issues.push({
+        code: "AIO-HOOK-MISSING",
+        path: relativePath,
+        message: "Managed AIongside Hooks are missing or not a regular file.",
+        hint: "Run `aiongside skill sync`.",
+      });
+      continue;
+    }
+    const hookSource = await readFile(target, "utf8");
+    if (!agentHookSettingsAreCurrent(hookSource)) {
+      issues.push({
+        code: "AIO-HOOK-DRIFT",
+        path: relativePath,
+        message: "Managed AIongside Hooks are missing, invalid, or outdated.",
+        hint: "Fix conflicting Hook settings and run `aiongside skill sync`.",
+      });
+    }
+  }
+  return issues;
 }
 
 async function withWorkspaceLock<T>(
@@ -1708,8 +2393,8 @@ function workspaceInvalidError(issue: ValidationIssue): WorkspaceError {
   );
 }
 
-async function nextWorkNumber(root: string, prefix: string): Promise<number> {
-  const pattern = new RegExp(`^${prefix}-(\\d+)$`);
+async function nextWorkNumber(root: string, prefix: string): Promise<bigint> {
+  const pattern = new RegExp(`^${prefix}-([1-9]\\d*)$`);
   const entries = await readdir(path.join(root, WORK_DIR), {
     withFileTypes: true,
   });
@@ -1717,8 +2402,13 @@ async function nextWorkNumber(root: string, prefix: string): Promise<number> {
     .filter((entry) => entry.isDirectory())
     .map((entry) => pattern.exec(entry.name))
     .filter((match): match is RegExpExecArray => match !== null)
-    .map((match) => Number.parseInt(match[1] ?? "", 10));
-  return Math.max(0, ...numbers) + 1;
+    .map((match) => BigInt(match[1] ?? "0"));
+  return (
+    numbers.reduce(
+      (largest, value) => (value > largest ? value : largest),
+      0n,
+    ) + 1n
+  );
 }
 
 async function atomicWrite(target: string, contents: string): Promise<void> {

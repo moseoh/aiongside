@@ -15,7 +15,15 @@ const files = stdout
 const violations = [];
 
 for (const file of files) {
-  const source = await readFile(file, "utf8");
+  let source;
+  try {
+    source = await readFile(file, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      continue;
+    }
+    throw error;
+  }
   for (const [index, line] of source.split("\n").entries()) {
     if (/[\uac00-\ud7a3]/.test(line)) {
       violations.push(`${file}:${index + 1}`);
