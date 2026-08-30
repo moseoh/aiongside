@@ -9,13 +9,26 @@ The first goal is simple local work management. The second goal is a validation 
 - MVP CLI implemented.
 - Workspace initialization, work item creation, status movement, dependency management, cancellation, safe discard, and validation implemented.
 - Editable workspace templates implemented.
-- npm publishing not started.
+- npm packaging and release validation implemented. The first npm release is pending.
 - TypeScript monorepo managed with Bun.
 - Shared Claude and Codex plugin source included.
 - Local Web UI reserved for the distant future.
 - TUI excluded from product scope.
 
 ## Quick start
+
+After the first npm release, install AIongside with Node.js 22 or later:
+
+```sh
+npm install --global aiongside
+aiongside --help
+aiongside init ./example
+aiongside --root ./example check
+```
+
+The installed CLI runs on Node.js without requiring Bun. Node.js 22 and 24 are tested for every release candidate.
+
+To run from source before the first release:
 
 ```sh
 bun install
@@ -132,9 +145,12 @@ aiongside check
 
 ```sh
 bun run check
+bun run package:check
 ```
 
 Node.js 22 and 24 are supported. Development uses Node.js 24.
+
+Publishing requires an npm owner for `aiongside` and an npm Trusted Publisher restricted to `moseoh/aiongside` and `.github/workflows/publish.yml`. A published GitHub Release must use a tag that exactly matches `v<package-version>`. The release workflow rejects version mismatches, existing npm versions, package validation failures, and Node.js 22 or 24 smoke-test failures before publishing.
 
 ## License
 

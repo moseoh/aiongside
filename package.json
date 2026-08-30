@@ -16,6 +16,11 @@
     "bundle": "bun build packages/cli/src/bin.ts --target=node --packages=bundle --outfile packages/cli/dist/bin.js",
     "typecheck": "tsc -b --pretty false",
     "test": "bun run build && node ./node_modules/vitest/vitest.mjs run",
+    "package:prepare": "bun run build && node scripts/package.mjs prepare",
+    "package:pack": "bun run build && node scripts/package.mjs pack",
+    "package:smoke": "node scripts/smoke-package.mjs",
+    "package:test": "node --test scripts/*.node-test.mjs",
+    "package:check": "bun run build && bun run package:test && node scripts/package.mjs check",
     "lint": "biome check .",
     "check:english": "node scripts/check-english.mjs",
     "check": "bun run typecheck && bun run test && bun run lint && bun run check:english"
@@ -24,6 +29,7 @@
     "@biomejs/biome": "^2.0.0",
     "@types/node": "^22.0.0",
     "typescript": "^6.0.0",
-    "vitest": "^4.0.0"
+    "vitest": "^4.0.0",
+    "yaml": "^2.0.0"
   }
 }

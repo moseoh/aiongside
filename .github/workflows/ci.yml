@@ -30,3 +30,4 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: bun ci
       - run: bun run check
+      - run: bun run package:check

@@ -9,11 +9,12 @@
         "@types/node": "^22.0.0",
         "typescript": "^6.0.0",
         "vitest": "^4.0.0",
+        "yaml": "^2.0.0",
       },
     },
     "packages/cli": {
       "name": "aiongside",
-      "version": "0.0.0",
+      "version": "0.1.0",
       "bin": {
         "aiongside": "./dist/bin.js",
       },

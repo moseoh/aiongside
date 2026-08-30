@@ -1,0 +1,75 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: bun ci
+      - run: bun run check
+      - run: node scripts/verify-release.mjs "${{ github.event.release.tag_name }}"
+      - run: bun run package:pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: .artifacts/npm/*.tgz
+          if-no-files-found: error
+          retention-days: 1
+
+  smoke:
+    name: Smoke on Node ${{ matrix.node }}
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+          path: .artifacts/npm
+      - run: node scripts/smoke-package.mjs .artifacts/npm/aiongside-*.tgz
+
+  publish:
+    name: Publish to npm
+    needs: [package, smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: npm install --global npm@11.17.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+          path: .artifacts/npm
+      - run: npm publish .artifacts/npm/aiongside-*.tgz
