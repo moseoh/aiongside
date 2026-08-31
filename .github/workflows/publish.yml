@@ -28,7 +28,7 @@ jobs:
       - run: bun run check
       - run: node scripts/verify-release.mjs "${{ github.event.release.tag_name }}"
       - run: bun run package:pack
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: npm-package
           path: .artifacts/npm/*.tgz
