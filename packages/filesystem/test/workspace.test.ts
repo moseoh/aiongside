@@ -1,6 +1,7 @@
 import {
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rename,
   rm,
@@ -214,7 +215,7 @@ describe("workspace lifecycle", () => {
       "utf8",
     );
 
-    expect(config).toContain("agentSkillVersion: 4");
+    expect(config).toContain("agentSkillVersion: 5");
     for (const target of [
       path.join(root, ".agents", "skills", "aiongside", "SKILL.md"),
       path.join(root, ".claude", "skills", "aiongside", "SKILL.md"),
@@ -233,6 +234,16 @@ describe("workspace lifecycle", () => {
     }
     expect(await pathExists(path.join(root, "AGENTS.md"))).toBe(false);
     expect(await pathExists(path.join(root, "CLAUDE.md"))).toBe(false);
+  });
+
+  test("creates an empty Knowledge Registry without default Knowledge entries", async () => {
+    const root = await workspace();
+    const knowledgePath = path.join(root, "knowledge");
+
+    expect(
+      await readFile(path.join(knowledgePath, "registry.md"), "utf8"),
+    ).toBe("# Knowledge registry\n\n| Key | Display name |\n| --- | --- |\n");
+    expect(await readdir(knowledgePath)).toEqual(["registry.md"]);
   });
 
   test("preserves existing Agent entry files and Hook settings on init", async () => {
@@ -280,7 +291,7 @@ describe("workspace lifecycle", () => {
     await mkdir(path.dirname(olderTarget), { recursive: true });
     await writeFile(
       olderTarget,
-      source.replace('aiongside-version: "4"', 'aiongside-version: "3"'),
+      source.replace('aiongside-version: "5"', 'aiongside-version: "4"'),
     );
     await initializeWorkspace(olderRoot);
     expect(await readFile(olderTarget, "utf8")).toBe(source);
@@ -321,8 +332,8 @@ describe("workspace lifecycle", () => {
       "SKILL.md",
     );
     const newer = source.replace(
-      'aiongside-version: "4"',
       'aiongside-version: "5"',
+      'aiongside-version: "6"',
     );
     await mkdir(path.dirname(newerTarget), { recursive: true });
     await writeFile(newerTarget, newer);
@@ -361,7 +372,7 @@ describe("workspace lifecycle", () => {
     const root = await workspace();
     const configPath = path.join(root, ".aiongside", "config.yaml");
     const legacyConfig = (await readFile(configPath, "utf8")).replace(
-      "agentSkillVersion: 4\n",
+      "agentSkillVersion: 5\n",
       "",
     );
     await writeFile(configPath, legacyConfig);
@@ -413,7 +424,7 @@ describe("workspace lifecycle", () => {
     );
     await writeFile(
       skillPath,
-      source.replace('aiongside-version: "4"', 'aiongside-version: "3"'),
+      source.replace('aiongside-version: "5"', 'aiongside-version: "4"'),
     );
     expect((await syncAgentSkills(root)).changes).toContainEqual({
       path: ".agents/skills/aiongside/SKILL.md",
@@ -425,8 +436,8 @@ describe("workspace lifecycle", () => {
     await writeFile(
       configPath,
       (await readFile(configPath, "utf8")).replace(
-        "agentSkillVersion: 4",
         "agentSkillVersion: 5",
+        "agentSkillVersion: 6",
       ),
     );
     const before = await readFile(skillPath, "utf8");
@@ -440,7 +451,7 @@ describe("workspace lifecycle", () => {
     const root = await workspace();
     const configPath = path.join(root, ".aiongside", "config.yaml");
     const legacyConfig = (await readFile(configPath, "utf8")).replace(
-      "agentSkillVersion: 4\n",
+      "agentSkillVersion: 5\n",
       "",
     );
     await writeFile(configPath, legacyConfig);
@@ -574,7 +585,7 @@ describe("workspace lifecycle", () => {
 
     await writeFile(
       agentsPath,
-      source.replace('aiongside-version: "4"', 'aiongside-version: "3"'),
+      source.replace('aiongside-version: "5"', 'aiongside-version: "4"'),
     );
     expect(await validateWorkspace(root)).toContainEqual(
       expect.objectContaining({ code: "AIO-SKILL-OUTDATED" }),
@@ -1339,16 +1350,45 @@ describe("workspace lifecycle", () => {
     expect(await validateWorkspace(root)).toEqual([]);
   });
 
-  test("keeps Knowledge Registry outside individual completion seals", async () => {
+  test("preserves shared Knowledge outside work mutations and completion seals", async () => {
     const root = await workspace();
+    const registryPath = path.join(root, "knowledge", "registry.md");
+    const overviewPath = path.join(
+      root,
+      "knowledge",
+      "content-operations",
+      "overview.md",
+    );
+    const guidePath = path.join(
+      root,
+      "knowledge",
+      "content-operations",
+      "guides",
+      "publishing.md",
+    );
+    await mkdir(path.dirname(guidePath), { recursive: true });
+    await writeFile(
+      registryPath,
+      "# Knowledge registry\n\n| Key | Display name |\n| --- | --- |\n| content-operations | Content Operations |\n",
+    );
+    await writeFile(overviewPath, "# Content Operations\n");
+    await writeFile(guidePath, "# Publishing\n");
+    const knowledgeTargets = [registryPath, overviewPath, guidePath];
+    const beforeMutation = await Promise.all(
+      knowledgeTargets.map((target) => readFile(target)),
+    );
+
     const work = await createWork(root, "Shared knowledge boundary");
+    expect(await validateWorkspace(root)).toEqual([]);
+    expect(
+      await Promise.all(knowledgeTargets.map((target) => readFile(target))),
+    ).toEqual(beforeMutation);
+
     await confirmWork(root, work.id, [...allChecks]);
     await moveWork(root, work.id, "done");
 
-    await writeFile(
-      path.join(root, "knowledge", "registry.md"),
-      "A user-defined Knowledge Registry format\n",
-    );
+    await writeFile(overviewPath, "# Content Operations\n\nCurrent facts.\n");
+    await writeFile(guidePath, "# Publishing\n\nCurrent process.\n");
 
     expect(await validateWorkspace(root)).toEqual([]);
   });

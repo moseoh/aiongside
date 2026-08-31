@@ -105,6 +105,11 @@ work/<ID>/
 views/
   open.md
   closed.md
+knowledge/
+  registry.md
+  <key>/
+    overview.md
+    ...                   # User-defined files and nested directories
 ```
 
 `record.md` is the canonical work document. It owns status, progress, decisions, and outcomes. `overview.md` is the short human-readable entry point and does not duplicate dynamic state. Its machine-owned `recordBodyDigest` records which Record Markdown body was last reviewed. `plan.md` is optional and is created when a work item moves to `active`.
@@ -128,6 +133,10 @@ Each new work item includes three user-owned content directories:
 AIongside requires these directories but does not constrain their file names, formats, or nested structure. Their contents are never rewritten automatically. File paths and exact bytes in all three directories are covered by the completion seal, so changing them while work remains `done` fails validation. Direct edits do not update Record metadata or generated Views.
 
 Older workspaces may contain `reports/` instead of `deliverables/` and may not contain `evidence/`. AIongside does not move or delete those files automatically. Review the existing content, move delivery outputs into a new `deliverables/` directory, and create `evidence/` before running further mutations.
+
+`knowledge/registry.md` is the entry point for persistent Knowledge shared across work items. Each kebab-case key in its `Key` column maps to `knowledge/<key>/overview.md`; the separate `Display name` is for people. New workspaces start with an empty Registry and no default Knowledge keys.
+
+Use each `overview.md` as that Knowledge's entry point. Add any files and nested directories below `knowledge/<key>/` as the subject grows. AIongside does not impose their names, formats, or internal structure and does not rewrite shared Knowledge automatically. Shared Knowledge is outside individual work completion seals. Existing Registry files remain user-owned and are not migrated automatically; a heading that uses the previous classification term can be renamed manually.
 
 Views are generated from Record metadata and must not be edited directly. `aiongside check` compares each View with a deterministic rendering of current Records. Missing, stale, manually modified, or line-ending-converted Views fail validation without changing files. Run `aiongside view rebuild` for explicit recovery.
 

@@ -3,7 +3,7 @@ name: aiongside
 description: Manage local AIongside work records and generated views. Use when a workspace contains .aiongside/config.yaml or the user asks to initialize or operate an AIongside workspace.
 license: MIT
 metadata:
-  aiongside-version: "4"
+  aiongside-version: "5"
 ---
 
 # AIongside
@@ -60,6 +60,12 @@ Do not run sync without reviewing the Overview. Sync records the current Record 
 Do not impose file names, formats, or a nested structure inside these directories. Do not rewrite their contents automatically. Reopen `done` work before changing supporting content because file paths and exact bytes are covered by the completion seal.
 
 For an older workspace, review any `reports/` content and move delivery outputs into `deliverables/`. Create `evidence/` if it is missing. Never move or delete legacy files without the user's approval.
+
+## Knowledge
+
+`knowledge/registry.md` is the workspace entry point for persistent Knowledge. Each registered kebab-case `Key` maps to `knowledge/<key>/overview.md`; the Registry keeps the separate human-readable `Display name`.
+
+Treat `overview.md` as the entry point for that Knowledge. Users may add any files and nested directories below `knowledge/<key>/`; do not impose names, formats, or a fixed internal structure. Do not create default Knowledge keys or automatically rewrite, merge, or reorganize shared Knowledge. Shared Knowledge is outside every individual work completion seal.
 
 ## Discard
 

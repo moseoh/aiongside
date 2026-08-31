@@ -183,7 +183,7 @@ describe("CLI", () => {
     await writeFile(
       configPath,
       (await readFile(configPath, "utf8")).replace(
-        "agentSkillVersion: 4\n",
+        "agentSkillVersion: 5\n",
         "",
       ),
     );
@@ -193,7 +193,7 @@ describe("CLI", () => {
     await mkdir(nested, { recursive: true });
 
     const synced = await cli(["--root", nested, "skill", "sync"]);
-    expect(synced.stdout).toContain("Agent integration synced (version 4)");
+    expect(synced.stdout).toContain("Agent integration synced (version 5)");
     expect(synced.stdout).toContain(
       "+ Created  .agents/skills/aiongside/SKILL.md",
     );
@@ -206,7 +206,7 @@ describe("CLI", () => {
 
     const noOp = await cli(["--root", root, "skill", "sync"]);
     expect(noOp.stdout).toContain(
-      "✓ Agent integration is current (version 4)\n",
+      "✓ Agent integration is current (version 5)\n",
     );
     expect(noOp.stdout).toContain("Approve project Hooks");
   });

@@ -11,7 +11,8 @@ This file is managed by AIongside. Put workspace-specific instructions in `.aion
 7. Ask the user for every `missingInputs` question and pass each answer through its listed CLI option.
 8. Reopen `done` work before changing its Record, dependencies, references, deliverables, or evidence.
 9. Store received material in `references/`, delivery outputs in `deliverables/`, and direct observations in `evidence/`.
-10. Treat discard as destructive: show `aiongside work discard <ID> --dry-run`, stop, and wait for explicit approval before `--confirm`.
-11. Run `aiongside check` before finishing. Report every remaining issue with its code and path.
+10. Use `knowledge/registry.md` as the shared Knowledge entry point. A registered key maps to `knowledge/<key>/overview.md`; preserve any user-defined files and nested structure below it.
+11. Treat discard as destructive: show `aiongside work discard <ID> --dry-run`, stop, and wait for explicit approval before `--confirm`.
+12. Run `aiongside check` before finishing. Report every remaining issue with its code and path.
 
 Use the installed `aiongside` Agent Skill for detailed command procedures and edge cases.

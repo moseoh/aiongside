@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Replaced the previous classification heading with the product-neutral `Knowledge registry`.
+- Defined `knowledge/<key>/overview.md` as the entry point for each registered Knowledge key while leaving nested content user-defined.
+- Kept shared Knowledge outside individual work completion seals and automatic rewrites.
+
 ## 0.2.1 - 2026-08-30
 
 ### Changed

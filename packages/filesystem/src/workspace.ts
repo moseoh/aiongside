@@ -209,7 +209,7 @@ export async function initializeWorkspace(
   }
   await atomicWrite(
     path.join(root, "knowledge", "registry.md"),
-    "# Knowledge areas\n\n| Key | Display name |\n| --- | --- |\n",
+    "# Knowledge registry\n\n| Key | Display name |\n| --- | --- |\n",
   );
   await writeViews(root, []);
   await applyAgentIntegrationState(
