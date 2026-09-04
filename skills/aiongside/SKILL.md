@@ -3,7 +3,7 @@ name: aiongside
 description: Manage local AIongside work records and generated views. Use when a workspace contains .aiongside/config.yaml or the user asks to initialize or operate an AIongside workspace.
 license: MIT
 metadata:
-  aiongside-version: "6"
+  aiongside-version: "7"
 ---
 
 # AIongside
@@ -13,6 +13,8 @@ metadata:
 1. Find the workspace root containing `.aiongside/config.yaml`.
 2. Read `.aiongside/instructions.md` and `.aiongside/rules.md` completely.
 3. Read the relevant `work/<ID>/record.md` before changing a work item.
+
+Do not preload all Work or Knowledge content. Explore only the topics needed for the current task.
 
 Do not check for updates automatically. Run `aiongside update` only when the user explicitly asks to update AIongside.
 
@@ -30,6 +32,10 @@ Do not check for updates automatically. Run `aiongside update` only when the use
 - Remove dependency: `aiongside work needs remove <ID> <dependency-ID>`
 - Add Knowledge relationship: `aiongside work knowledge add <ID> <key>`
 - Remove Knowledge relationship: `aiongside work knowledge remove <ID> <key>`
+- List Knowledge: `aiongside knowledge list`
+- Browse the Knowledge hierarchy: `aiongside knowledge tree`
+- Show one Knowledge topic: `aiongside knowledge show <key>`
+- Confirm Knowledge Overview review: `aiongside knowledge sync <key>`
 - Cancel alias: `aiongside work cancel <ID> --cancellation-reason "<reason>"`
 - Preview discard: `aiongside work discard <ID> --dry-run`
 - Rebuild generated views: `aiongside view rebuild`
@@ -65,9 +71,19 @@ For an older workspace, review any `reports/` content and move delivery outputs 
 
 ## Knowledge
 
-`knowledge/registry.md` is the workspace entry point for persistent Knowledge. Its managed table uses `Key`, `Path`, `Parent`, and `Display name`. `Key` is a stable, globally unique relationship identifier. `Path` locates the topic below `knowledge/`, `Parent` optionally names another registered key, and `Display name` is for people.
+`knowledge/registry.md` is the workspace entry point for persistent Knowledge. Its managed table uses `Key`, `Path`, `Parent`, and `Display name`. `Key` is a stable, globally unique relationship identifier. `Path` locates the topic below `knowledge/`, `Parent` optionally names another registered key, and `Display name` is for people. Use `knowledge list`, `tree`, and `show` to explore topics on demand instead of loading every document.
 
-Every registered path has an `overview.md`. Registered topics may be nested at any depth. Unregistered files and directories below a registered topic are user-owned internal content, not separate Knowledge relationships. Relate Work to the most specific registered key with `work knowledge add`; do not add parent keys automatically. Do not impose names, formats, or a fixed internal structure, and do not automatically rewrite, merge, move, or reorganize shared Knowledge. Shared Knowledge is outside every individual work completion seal.
+Every registered path has an `overview.md`. Registered topics may be nested at any depth. Unregistered files and directories below a registered topic are user-owned internal content, not separate Knowledge relationships. A registered nested topic owns its own subtree; its contents do not make ancestors stale. Direct child registration changes require the parent Overview to be reviewed.
+
+Add a Work relationship only when the Work changes persistent Knowledge or requires it to be revalidated. Merely consulting a topic does not create a relationship. Add only the most specific registered key, never parent keys automatically. If the impact is unclear, ask the user.
+
+After changing content owned by a registered topic:
+
+1. Read its `overview.md` and the smallest relevant content set.
+2. Update the Overview only when its scope or navigation is no longer accurate.
+3. Run `aiongside knowledge sync <key>` only after completing that review.
+
+Never sync automatically or use sync as a substitute for reviewing content. Do not impose names, formats, or a fixed internal structure, and do not automatically rewrite, merge, move, or reorganize shared Knowledge. Shared Knowledge is outside every individual Work completion seal.
 
 ## Discard
 

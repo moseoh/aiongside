@@ -12,11 +12,13 @@ import {
   createSessionStartHookOutput,
   createStopHookOutput,
   evaluateTransition,
+  formatKnowledgeOverviewDocument,
   formatMarkdownDocument,
   isExactAgentSkillSource,
   overviewMetadataSchema,
   parseAgentHookEvent,
   parseAgentSkill,
+  parseKnowledgeOverviewDocument,
   parseKnowledgeRegistry,
   parseMarkdownDocument,
   renderViews,
@@ -191,6 +193,66 @@ describe("Markdown document", () => {
         recordBodyDigest: "not-a-digest",
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("Knowledge Overview document", () => {
+  const managed = {
+    schema: 1 as const,
+    key: "development-environment",
+    contentDigest: "a".repeat(64),
+  };
+
+  test("adds managed metadata without changing a plain Markdown body", () => {
+    const source = "# Development environment\n\nUser-owned body.  \n";
+    const formatted = formatKnowledgeOverviewDocument(source, managed);
+    const parsed = parseKnowledgeOverviewDocument(formatted);
+
+    expect(parsed.managed).toEqual(managed);
+    expect(formatted.endsWith(source)).toBe(true);
+  });
+
+  test("preserves user frontmatter values and CRLF body bytes", () => {
+    const source = [
+      "---",
+      "owner: platform",
+      "labels:",
+      "  - internal",
+      "---",
+      "",
+      "# Development environment  ",
+      "",
+    ].join("\r\n");
+    const bodyStart = source.indexOf("\r\n---\r\n") + "\r\n---".length;
+    const formatted = formatKnowledgeOverviewDocument(source, managed);
+    const parsed = parseKnowledgeOverviewDocument(formatted);
+
+    expect(parsed.metadata).toEqual(
+      expect.objectContaining({
+        owner: "platform",
+        labels: ["internal"],
+      }),
+    );
+    expect(formatted.slice(formatted.indexOf("\r\n---\r\n") + 5)).toBe(
+      source.slice(bodyStart),
+    );
+  });
+
+  test("accepts missing metadata and rejects invalid managed metadata", () => {
+    expect(
+      parseKnowledgeOverviewDocument("# Existing\n").managed,
+    ).toBeUndefined();
+    expect(() =>
+      parseKnowledgeOverviewDocument(`---
+aiongside:
+  schema: 1
+  key: Invalid Key
+  contentDigest: ${"a".repeat(64)}
+---
+
+# Existing
+`),
+    ).toThrow("Invalid aiongside Knowledge metadata");
   });
 });
 

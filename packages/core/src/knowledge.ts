@@ -1,8 +1,35 @@
+import { stringify } from "yaml";
+import { z } from "zod";
+import {
+  DocumentFormatError,
+  parseMarkdownDocument,
+  replaceMarkdownMetadata,
+} from "./frontmatter.js";
 import { knowledgeKeySchema } from "./model.js";
 
 const CURRENT_HEADERS = ["Key", "Path", "Parent", "Display name"] as const;
 const LEGACY_HEADERS = ["Key", "Display name"] as const;
 const PATH_SEGMENT = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const SHA256 = /^[a-f0-9]{64}$/;
+
+export const knowledgeOverviewMetadataSchema = z
+  .object({
+    schema: z.literal(1),
+    key: knowledgeKeySchema,
+    contentDigest: z.string().regex(SHA256, "Expected a SHA-256 digest"),
+  })
+  .strict();
+
+export type KnowledgeOverviewMetadata = z.infer<
+  typeof knowledgeOverviewMetadataSchema
+>;
+
+export interface KnowledgeOverviewDocument {
+  metadata: Record<string, unknown>;
+  managed?: KnowledgeOverviewMetadata;
+  body: string;
+  hasFrontmatter: boolean;
+}
 
 export interface KnowledgeEntry {
   key: string;
@@ -33,6 +60,77 @@ export class KnowledgeRegistryFormatError extends Error {
     super(message);
     this.name = "KnowledgeRegistryFormatError";
   }
+}
+
+export class KnowledgeOverviewFormatError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "KnowledgeOverviewFormatError";
+  }
+}
+
+export function parseKnowledgeOverviewDocument(
+  source: string,
+): KnowledgeOverviewDocument {
+  if (!/^---(?:\r?\n|$)/.test(source)) {
+    return {
+      metadata: {},
+      body: source,
+      hasFrontmatter: false,
+    };
+  }
+
+  let document: ReturnType<typeof parseMarkdownDocument>;
+  try {
+    document = parseMarkdownDocument(source);
+  } catch (error) {
+    throw new KnowledgeOverviewFormatError(errorMessage(error));
+  }
+  if (!isRecord(document.metadata)) {
+    throw new KnowledgeOverviewFormatError(
+      "Knowledge Overview frontmatter must be a YAML mapping.",
+    );
+  }
+  const managedSource = document.metadata.aiongside;
+  if (managedSource === undefined) {
+    return {
+      metadata: document.metadata,
+      body: document.body,
+      hasFrontmatter: true,
+    };
+  }
+  const managed = knowledgeOverviewMetadataSchema.safeParse(managedSource);
+  if (!managed.success) {
+    throw new KnowledgeOverviewFormatError(
+      `Invalid aiongside Knowledge metadata: ${managed.error.issues
+        .map(
+          (issue) => `${issue.path.join(".") || "metadata"}: ${issue.message}`,
+        )
+        .join("; ")}`,
+    );
+  }
+  return {
+    metadata: document.metadata,
+    managed: managed.data,
+    body: document.body,
+    hasFrontmatter: true,
+  };
+}
+
+export function formatKnowledgeOverviewDocument(
+  source: string,
+  managed: KnowledgeOverviewMetadata,
+): string {
+  const document = parseKnowledgeOverviewDocument(source);
+  const metadata = { ...document.metadata, aiongside: managed };
+  if (document.hasFrontmatter) {
+    return replaceMarkdownMetadata(source, metadata);
+  }
+  const lineEnding = source.includes("\r\n") ? "\r\n" : "\n";
+  const yaml = stringify(metadata, { lineWidth: 0 })
+    .trimEnd()
+    .replaceAll("\n", lineEnding);
+  return `---${lineEnding}${yaml}${lineEnding}---${lineEnding}${lineEnding}${source}`;
 }
 
 export function parseKnowledgeRegistry(source: string): KnowledgeRegistry {
@@ -283,4 +381,15 @@ function parentProblem(
     field: "parent",
     message,
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof DocumentFormatError) {
+    return error.message;
+  }
+  return error instanceof Error ? error.message : String(error);
 }

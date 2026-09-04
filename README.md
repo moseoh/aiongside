@@ -13,7 +13,7 @@ The first goal is simple local work management. The second goal is a validation 
 - TypeScript monorepo managed with Bun.
 - Project-local Agent Skills, managed instructions, and lifecycle Hooks installed and validated by the CLI.
 - Record-body freshness tracking for human-readable Overviews implemented.
-- Nested Knowledge Registry validation and Work relationships implemented.
+- Nested Knowledge lifecycle, freshness validation, exploration, sync, and Work completion gates implemented.
 - Local Web UI reserved for the distant future.
 - TUI excluded from product scope.
 
@@ -70,7 +70,7 @@ Claude Code and Codex CLI are the official MVP agent integrations. Other product
 
 These files are generated from the skill included with the installed CLI. Do not edit them directly. Put workspace-specific instructions in `.aiongside/rules.md` and create separately named skills for unrelated procedures.
 
-The CLI also copies its always-on instructions to `.aiongside/instructions.md` and registers project-local `SessionStart` and `Stop` Hooks in `.claude/settings.json` and `.codex/hooks.json`. Session start injects the managed instructions and user rules. Session stop runs the same read-only validation as `aiongside check`; the first failure blocks completion and one retry reports remaining problems without blocking again.
+The CLI also copies its always-on instructions to `.aiongside/instructions.md` and registers project-local `SessionStart` and `Stop` Hooks in `.claude/settings.json` and `.codex/hooks.json`. Session start injects the managed instructions and user rules without preloading all Work or Knowledge content. Session stop runs the same read-only validation as `aiongside check`; the first failure, including stale Knowledge, blocks completion and one retry reports remaining problems without blocking again.
 
 Claude Code or Codex CLI may ask you to approve project Hooks. Review and approve the two `aiongside hook` commands in the agent product. AIongside does not change user trust settings or user-home configuration. If `aiongside` is no longer on `PATH`, reinstall the global CLI; Hooks never install or update packages automatically.
 
@@ -139,7 +139,34 @@ Older workspaces may contain `reports/` instead of `deliverables/` and may not c
 
 `knowledge/registry.md` is the entry point for persistent Knowledge shared across work items. Its managed table has `Key`, `Path`, `Parent`, and `Display name` columns. A key is a stable, globally unique relationship identifier. A path locates the topic below `knowledge/`, an optional parent names another registered key, and the display name is for people. New workspaces start with an empty Registry and no default Knowledge keys.
 
-Registered topics can use paths at any depth and each registered path must contain `overview.md`. Unregistered files and directories below a topic remain user-owned internal content rather than independent relationship targets. AIongside does not impose their names, formats, or internal structure and does not rewrite shared Knowledge automatically. Shared Knowledge is outside individual work completion seals.
+Registered topics can use paths at any depth and each registered path must contain `overview.md`. Explore only what the current task needs:
+
+```sh
+aiongside knowledge list
+aiongside knowledge tree
+aiongside knowledge show incident-response
+```
+
+Each Overview stores machine-owned freshness metadata under one namespace while preserving its Markdown body and other frontmatter:
+
+```yaml
+aiongside:
+  schema: 1
+  key: incident-response
+  contentDigest: <sha256>
+```
+
+A topic owns the content below its registered path except its own Overview and every physically nested registered topic. Unregistered files and directories belong to the nearest registered topic. A nested topic's content changes only its own digest. Changes to a direct child's Registry tuple make only its parent stale so the parent routing can be reviewed.
+
+Markdown line endings are normalized for the digest. Other files use exact bytes. Symlinks contribute their path and target string without being followed. AIongside does not impose names, formats, or internal structure and does not rewrite shared Knowledge automatically. Shared Knowledge is outside individual work completion seals.
+
+After changing owned content, review the Overview and update its scope or navigation when needed. Record that review explicitly:
+
+```sh
+aiongside knowledge sync incident-response
+```
+
+Sync updates only the managed metadata. It never writes Overview prose and must not be run automatically without review. Missing or mismatched metadata and changed owned content produce `AIO-KNOWLEDGE-STALE`. Existing Overviews without metadata remain unchanged and stale until their first explicit sync.
 
 The legacy two-column `Key` and `Display name` table remains readable: each key resolves to the same top-level path with no parent. AIongside does not rewrite an existing Registry automatically. Once a legacy row is present, its `knowledge/<key>/overview.md` entry point must exist.
 
@@ -150,7 +177,7 @@ aiongside work knowledge add WORK-1 incident-response
 aiongside work knowledge remove WORK-1 incident-response
 ```
 
-The `done` dry-run returns a `knowledgeReview` object. When it lists targets, review each target Overview and update only the smallest relevant internal documents. Update an Overview only when its scope or navigation changed. When it has no targets, explicitly confirm that the work has no lasting Knowledge impact. Then record the existing `knowledge` confirmation before moving to `done`. Reopening preserves the candidate keys but resets that confirmation for the next completion cycle.
+The `done` dry-run returns a `knowledgeReview` object with each target's current path, Overview, and freshness. When it lists targets, review each target Overview and update only the smallest relevant internal documents. Update an Overview only when its scope or navigation changed, then sync it. Stale linked topics block `done`; unrelated stale topics do not. When there are no targets, explicitly confirm that the work has no lasting Knowledge impact. Then record the existing `knowledge` confirmation before moving to `done`. Reopening preserves the candidate keys but resets that confirmation for the next completion cycle. Later Knowledge changes do not invalidate historical Work completion seals.
 
 Views are generated from Record metadata and must not be edited directly. `aiongside check` compares each View with a deterministic rendering of current Records. Missing, stale, manually modified, or line-ending-converted Views fail validation without changing files. Run `aiongside view rebuild` for explicit recovery.
 
@@ -216,6 +243,10 @@ aiongside work needs add <id> <dependency-id>
 aiongside work needs remove <id> <dependency-id>
 aiongside work knowledge add <id> <key>
 aiongside work knowledge remove <id> <key>
+aiongside knowledge list [--json]
+aiongside knowledge tree [--json]
+aiongside knowledge show <key> [--json]
+aiongside knowledge sync <key> [--json]
 aiongside work cancel <id> --cancellation-reason <text>
 aiongside work discard <id> --dry-run
 aiongside view rebuild

@@ -13,7 +13,10 @@ import {
   createWork,
   discardWork,
   findWorkspaceRoot,
+  getKnowledgeTree,
   initializeWorkspace,
+  type KnowledgeTreeNode,
+  listKnowledge,
   type MoveWorkOptions,
   type MoveWorkResult,
   moveWork,
@@ -23,7 +26,9 @@ import {
   rebuildViews,
   removeWorkDependency,
   removeWorkKnowledge,
+  showKnowledge,
   syncAgentSkills,
+  syncKnowledgeOverview,
   syncWorkOverview,
   validateWorkspace,
   WorkspaceError,
@@ -267,11 +272,11 @@ export function createProgram(): Command {
       );
     });
 
-  const knowledge = work
+  const workKnowledge = work
     .command("knowledge")
     .description("Manage work item Knowledge relationships");
 
-  knowledge
+  workKnowledge
     .command("add")
     .description("Add one Knowledge relationship to a work item")
     .argument("<id>", "Work item ID")
@@ -290,7 +295,7 @@ export function createProgram(): Command {
       );
     });
 
-  knowledge
+  workKnowledge
     .command("remove")
     .description("Remove one Knowledge relationship from a work item")
     .argument("<id>", "Work item ID")
@@ -393,6 +398,100 @@ export function createProgram(): Command {
       },
     );
 
+  const knowledge = program
+    .command("knowledge")
+    .description("Explore and sync registered Knowledge");
+
+  knowledge
+    .command("list")
+    .description("List registered Knowledge and freshness")
+    .option("--json", "Print structured Knowledge data")
+    .action(async (options: { json?: boolean }) => {
+      const root = await commandRoot(program);
+      const items = await listKnowledge(root);
+      if (options.json) {
+        ui.json(items, true);
+        return;
+      }
+      if (items.length === 0) {
+        ui.info("No Knowledge registered");
+        return;
+      }
+      ui.section("Knowledge");
+      ui.rows(
+        items.map((item) => ({
+          status: item.fresh ? "success" : "warning",
+          label: item.key,
+          detail: `${item.displayName} — ${item.path} — ${item.fresh ? "fresh" : "stale"}`,
+        })),
+      );
+    });
+
+  knowledge
+    .command("tree")
+    .description("Show the registered Knowledge hierarchy")
+    .option("--json", "Print structured Knowledge data")
+    .action(async (options: { json?: boolean }) => {
+      const root = await commandRoot(program);
+      const tree = await getKnowledgeTree(root);
+      if (options.json) {
+        ui.json(tree, true);
+        return;
+      }
+      if (tree.length === 0) {
+        ui.info("No Knowledge registered");
+        return;
+      }
+      ui.section("Knowledge tree");
+      ui.rows(flattenKnowledgeTree(tree));
+    });
+
+  knowledge
+    .command("show")
+    .description("Show one registered Knowledge topic")
+    .argument("<key>", "Registered Knowledge key")
+    .option("--json", "Print structured Knowledge data")
+    .action(async (key: string, options: { json?: boolean }) => {
+      const root = await commandRoot(program);
+      const item = await showKnowledge(root, key);
+      if (options.json) {
+        ui.json(item, true);
+        return;
+      }
+      ui.section(item.displayName);
+      ui.rows([
+        { label: "Key", detail: item.key },
+        { label: "Path", detail: item.path },
+        { label: "Parent", detail: item.parent ?? "—" },
+        { label: "Children", detail: item.children.join(", ") || "—" },
+        { label: "Overview", detail: item.overview },
+        {
+          status: item.fresh ? "success" : "warning",
+          label: "Freshness",
+          detail: item.fresh ? "fresh" : "stale",
+        },
+      ]);
+    });
+
+  knowledge
+    .command("sync")
+    .description("Record review of a Knowledge Overview and owned content")
+    .argument("<key>", "Registered Knowledge key")
+    .option("--json", "Print a structured sync result")
+    .action(async (key: string, options: { json?: boolean }) => {
+      const root = await commandRoot(program);
+      const result = await syncKnowledgeOverview(root, key);
+      if (options.json) {
+        ui.json(result, true);
+        return;
+      }
+      if (!result.changed) {
+        ui.success(`Knowledge is current — ${result.key} (${result.overview})`);
+        return;
+      }
+      ui.success(`Synced Knowledge — ${result.key} (${result.overview})`);
+    });
+
   const view = program.command("view").description("Manage generated Views");
 
   view
@@ -436,6 +535,20 @@ interface MoveCliOptions {
   resumeWhen?: string;
   waitingResolution?: string;
   cancellationReason?: string;
+}
+
+function flattenKnowledgeTree(
+  nodes: KnowledgeTreeNode[],
+  depth = 0,
+): Array<{ status: "success" | "warning"; label: string; detail: string }> {
+  return nodes.flatMap((node) => [
+    {
+      status: node.fresh ? ("success" as const) : ("warning" as const),
+      label: `${"  ".repeat(depth)}${node.key}`,
+      detail: `${node.path} — ${node.fresh ? "fresh" : "stale"}`,
+    },
+    ...flattenKnowledgeTree(node.children, depth + 1),
+  ]);
 }
 
 function addTransitionOptions(command: Command): Command {
@@ -521,9 +634,12 @@ function writeMoveResult(
     } else {
       ui.rows(
         result.knowledgeReview.targets.map((target) => ({
-          status: result.knowledgeReview?.confirmed ? "success" : "warning",
+          status:
+            result.knowledgeReview?.confirmed && target.fresh
+              ? "success"
+              : "warning",
           label: target.key,
-          detail: target.overview,
+          detail: `${target.overview} — ${target.fresh ? "fresh" : "stale"}`,
         })),
       );
       ui.hint(

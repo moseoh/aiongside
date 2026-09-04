@@ -19,15 +19,18 @@ import {
   createRecordDocument,
   createRulesDocument,
   evaluateTransition,
+  formatKnowledgeOverviewDocument,
   formatMarkdownDocument,
   isExactAgentSkillSource,
   isMovableStatus,
   isWorkCheck,
   type KnowledgeEntry,
+  KnowledgeOverviewFormatError,
   KnowledgeRegistryFormatError,
   knowledgeEntriesByKey,
   overviewMetadataSchema,
   parseAgentSkill,
+  parseKnowledgeOverviewDocument,
   parseKnowledgeRegistry,
   parseMarkdownDocument,
   renderViews,
@@ -58,6 +61,7 @@ import {
   mergeAgentHookSettings,
 } from "./agent-integration.js";
 import { WorkspaceError } from "./errors.js";
+import { calculateKnowledgeContentDigest } from "./knowledge-content.js";
 
 const CONFIG_PATH = path.join(".aiongside", "config.yaml");
 const WORK_DIR = "work";
@@ -105,6 +109,7 @@ export interface KnowledgeReviewTarget {
   key: string;
   path: string;
   overview: string;
+  fresh: boolean;
 }
 
 export interface KnowledgeReview {
@@ -129,6 +134,28 @@ export interface KnowledgeMutationResult {
   changed: boolean;
   knowledge: string[];
   metadata: WorkMetadata;
+}
+
+export interface KnowledgeInfo {
+  key: string;
+  displayName: string;
+  path: string;
+  parent: string | null;
+  children: string[];
+  overview: string;
+  fresh: boolean;
+}
+
+export interface KnowledgeTreeNode extends Omit<KnowledgeInfo, "children"> {
+  children: KnowledgeTreeNode[];
+}
+
+export interface SyncKnowledgeOverviewResult {
+  key: string;
+  changed: boolean;
+  path: string;
+  overview: string;
+  fresh: true;
 }
 
 export interface SyncOverviewResult {
@@ -532,7 +559,8 @@ export async function moveWork(
         issueTouchesWork(issue, normalizedId),
     );
     const context = await loadMoveContext(root, id);
-    const preview = buildMoveResult(
+    const preview = await buildMoveResult(
+      root,
       context.works,
       context.loaded,
       context.knowledgeEntries,
@@ -695,6 +723,7 @@ export async function previewMoveWork(
   }
   const context = await loadMoveContext(root, id);
   return buildMoveResult(
+    root,
     context.works,
     context.loaded,
     context.knowledgeEntries,
@@ -861,6 +890,7 @@ export async function removeWorkDependency(
       (issue) =>
         issue.code !== "AIO-STRUCTURE-VIEW" &&
         issue.code !== "AIO-VIEW-DRIFT" &&
+        issue.code !== "AIO-KNOWLEDGE-STALE" &&
         !DEPENDENCY_RELATION_CODES.has(issue.code),
     );
     if (blocking) {
@@ -1305,13 +1335,14 @@ async function loadMoveContext(
   return { works, loaded, knowledgeEntries: await loadKnowledgeEntries(root) };
 }
 
-function buildMoveResult(
+async function buildMoveResult(
+  root: string,
   works: LoadedWork[],
   loaded: LoadedWork,
   knowledgeEntries: KnowledgeEntry[],
   targetStatus: WorkStatus,
   options: MoveWorkOptions,
-): MoveWorkResult {
+): Promise<MoveWorkResult> {
   const rule = evaluateTransition(loaded.metadata.status, targetStatus);
   const requiredInputs: TransitionRequiredInput[] = rule.requiredInputs.map(
     (input) => ({
@@ -1369,6 +1400,23 @@ function buildMoveResult(
     }
   }
 
+  const knowledgeReview =
+    (rule.requirements.includes("D") || legacySealMigration) &&
+    !(rule.noOp && !legacySealMigration)
+      ? await resolveKnowledgeReview(root, loaded.metadata, knowledgeEntries)
+      : undefined;
+  for (const target of knowledgeReview?.targets ?? []) {
+    if (!target.fresh) {
+      requiredInputs.push({
+        key: `knowledgeFresh.${target.key}`,
+        source: "record",
+        question: `Knowledge ${target.key} is stale at ${target.overview}.`,
+        code: "AIO-KNOWLEDGE-STALE",
+        hint: `Review it and run \`aiongside knowledge sync ${target.key}\` before completion.`,
+      });
+    }
+  }
+
   const missingInputs = requiredInputs.filter((input) => {
     if (input.source === "option") {
       const value = options[input.key as keyof TransitionInputValues];
@@ -1414,12 +1462,6 @@ function buildMoveResult(
     changes.push("Reset verification, outcome, and knowledge confirmations.");
   }
 
-  const knowledgeReview =
-    (rule.requirements.includes("D") || legacySealMigration) &&
-    !(rule.noOp && !legacySealMigration)
-      ? resolveKnowledgeReview(loaded.metadata, knowledgeEntries)
-      : undefined;
-
   return {
     id: loaded.metadata.id,
     from: rule.from,
@@ -1437,25 +1479,30 @@ function buildMoveResult(
   };
 }
 
-function resolveKnowledgeReview(
+async function resolveKnowledgeReview(
+  root: string,
   metadata: WorkMetadata,
   entries: KnowledgeEntry[],
-): KnowledgeReview {
+): Promise<KnowledgeReview> {
   const byKey = knowledgeEntriesByKey(entries);
-  const targets = metadata.knowledge.map((key) => {
-    const entry = byKey.get(key);
-    if (!entry) {
-      throw new WorkspaceError(
-        `Knowledge key does not exist: ${key}`,
-        "AIO-WORK-KNOWLEDGE-MISSING",
-      );
-    }
-    return {
-      key,
-      path: entry.path,
-      overview: `knowledge/${entry.path}/${OVERVIEW_NAME}`,
-    };
-  });
+  const targets = await Promise.all(
+    metadata.knowledge.map(async (key) => {
+      const entry = byKey.get(key);
+      if (!entry) {
+        throw new WorkspaceError(
+          `Knowledge key does not exist: ${key}`,
+          "AIO-WORK-KNOWLEDGE-MISSING",
+        );
+      }
+      const status = await inspectKnowledgeOverview(root, entry, entries);
+      return {
+        key,
+        path: entry.path,
+        overview: knowledgeOverviewPath(entry),
+        fresh: status.issue === undefined,
+      };
+    }),
+  );
   return { confirmed: metadata.checks.knowledge, targets };
 }
 
@@ -1701,6 +1748,203 @@ async function writeWorkMetadataMutation(
   }
 }
 
+export async function listKnowledge(root: string): Promise<KnowledgeInfo[]> {
+  const entries = await loadKnowledgeEntries(root);
+  const result = await Promise.all(
+    [...entries]
+      .sort((left, right) => left.key.localeCompare(right.key))
+      .map((entry) => buildKnowledgeInfo(root, entry, entries)),
+  );
+  return result;
+}
+
+export async function showKnowledge(
+  root: string,
+  key: string,
+): Promise<KnowledgeInfo> {
+  const normalizedKey = key.trim().toLowerCase();
+  const entries = await loadKnowledgeEntries(root);
+  const entry = entries.find((candidate) => candidate.key === normalizedKey);
+  if (!entry) {
+    throw new WorkspaceError(
+      `Knowledge key does not exist: ${normalizedKey}. Check knowledge/registry.md.`,
+      "AIO-KNOWLEDGE-NOT-FOUND",
+    );
+  }
+  return buildKnowledgeInfo(root, entry, entries);
+}
+
+export async function getKnowledgeTree(
+  root: string,
+): Promise<KnowledgeTreeNode[]> {
+  const items = await listKnowledge(root);
+  const byParent = new Map<string | null, KnowledgeInfo[]>();
+  for (const item of items) {
+    const siblings = byParent.get(item.parent) ?? [];
+    siblings.push(item);
+    byParent.set(item.parent, siblings);
+  }
+  const build = (parent: string | null): KnowledgeTreeNode[] =>
+    (byParent.get(parent) ?? [])
+      .sort((left, right) => left.key.localeCompare(right.key))
+      .map((item) => ({
+        ...item,
+        children: build(item.key),
+      }));
+  return build(null);
+}
+
+export async function syncKnowledgeOverview(
+  root: string,
+  key: string,
+): Promise<SyncKnowledgeOverviewResult> {
+  return withWorkspaceLock(root, async () => {
+    const normalizedKey = key.trim().toLowerCase();
+    const entries = await loadKnowledgeEntries(root);
+    const entry = entries.find((candidate) => candidate.key === normalizedKey);
+    if (!entry) {
+      throw new WorkspaceError(
+        `Knowledge key does not exist: ${normalizedKey}. Check knowledge/registry.md.`,
+        "AIO-KNOWLEDGE-NOT-FOUND",
+      );
+    }
+    const structuralIssue = (await validateKnowledgeEntrypoint(root, entry))[0];
+    if (structuralIssue) throw workspaceInvalidError(structuralIssue);
+
+    const overview = knowledgeOverviewPath(entry);
+    const target = path.join(root, ...overview.split("/"));
+    const source = await readFile(target, "utf8");
+    let document: ReturnType<typeof parseKnowledgeOverviewDocument>;
+    try {
+      document = parseKnowledgeOverviewDocument(source);
+    } catch (error) {
+      throw new WorkspaceError(
+        `Cannot read Knowledge Overview for ${entry.key}: ${errorMessage(error)}`,
+        "AIO-KNOWLEDGE-OVERVIEW",
+      );
+    }
+    if (document.managed && document.managed.key !== entry.key) {
+      throw new WorkspaceError(
+        `Knowledge Overview key ${document.managed.key} does not match Registry key ${entry.key}: ${overview}`,
+        "AIO-KNOWLEDGE-IDENTITY",
+      );
+    }
+    const contentDigest = await calculateKnowledgeContentDigest(
+      root,
+      entry,
+      entries,
+    );
+    const next = formatKnowledgeOverviewDocument(source, {
+      schema: 1,
+      key: entry.key,
+      contentDigest,
+    });
+    if (next === source) {
+      return {
+        key: entry.key,
+        changed: false,
+        path: entry.path,
+        overview,
+        fresh: true,
+      };
+    }
+    await atomicWrite(target, next);
+    return {
+      key: entry.key,
+      changed: true,
+      path: entry.path,
+      overview,
+      fresh: true,
+    };
+  });
+}
+
+async function buildKnowledgeInfo(
+  root: string,
+  entry: KnowledgeEntry,
+  entries: KnowledgeEntry[],
+): Promise<KnowledgeInfo> {
+  const structuralIssue = (await validateKnowledgeEntrypoint(root, entry))[0];
+  if (structuralIssue) throw workspaceInvalidError(structuralIssue);
+  const status = await inspectKnowledgeOverview(root, entry, entries);
+  return {
+    key: entry.key,
+    displayName: entry.displayName,
+    path: entry.path,
+    parent: entry.parent ?? null,
+    children: entries
+      .filter((candidate) => candidate.parent === entry.key)
+      .map((candidate) => candidate.key)
+      .sort(),
+    overview: knowledgeOverviewPath(entry),
+    fresh: status.issue === undefined,
+  };
+}
+
+async function inspectKnowledgeOverview(
+  root: string,
+  entry: KnowledgeEntry,
+  entries: KnowledgeEntry[],
+): Promise<{ issue?: ValidationIssue; digest?: string }> {
+  const overview = knowledgeOverviewPath(entry);
+  const target = path.join(root, ...overview.split("/"));
+  let source: string;
+  try {
+    source = await readFile(target, "utf8");
+  } catch (error) {
+    return {
+      issue: {
+        code: "AIO-KNOWLEDGE-OVERVIEW",
+        path: overview,
+        message: `Cannot read Knowledge Overview for ${entry.key}: ${errorMessage(error)}`,
+      },
+    };
+  }
+  let document: ReturnType<typeof parseKnowledgeOverviewDocument>;
+  try {
+    document = parseKnowledgeOverviewDocument(source);
+  } catch (error) {
+    return {
+      issue: {
+        code: "AIO-KNOWLEDGE-OVERVIEW",
+        path: overview,
+        message:
+          error instanceof KnowledgeOverviewFormatError
+            ? error.message
+            : `Cannot parse Knowledge Overview: ${errorMessage(error)}`,
+        hint: "Fix the aiongside metadata without changing user-owned content.",
+      },
+    };
+  }
+  if (document.managed && document.managed.key !== entry.key) {
+    return {
+      issue: {
+        code: "AIO-KNOWLEDGE-IDENTITY",
+        path: overview,
+        message: `Knowledge Overview key ${document.managed.key} does not match Registry key ${entry.key}.`,
+        hint: `Restore the matching key before running \`aiongside knowledge sync ${entry.key}\`.`,
+      },
+    };
+  }
+  const digest = await calculateKnowledgeContentDigest(root, entry, entries);
+  if (!document.managed || document.managed.contentDigest !== digest) {
+    return {
+      digest,
+      issue: {
+        code: "AIO-KNOWLEDGE-STALE",
+        path: overview,
+        message: `Knowledge Overview is stale: ${entry.key}.`,
+        hint: `Review the Overview and owned content, then run \`aiongside knowledge sync ${entry.key}\`.`,
+      },
+    };
+  }
+  return { digest };
+}
+
+function knowledgeOverviewPath(entry: KnowledgeEntry): string {
+  return `knowledge/${entry.path}/${OVERVIEW_NAME}`;
+}
+
 async function loadKnowledgeEntries(root: string): Promise<KnowledgeEntry[]> {
   const registryPath = path.join(root, "knowledge", "registry.md");
   let entries: KnowledgeEntry[];
@@ -1908,6 +2152,7 @@ async function validateKnowledgeStructure(
       message: problem.message,
       hint: "Fix the managed table in knowledge/registry.md.",
     }));
+    const canInspectFreshness = issues.length === 0;
     const validPaths = new Set(
       registry.entries
         .filter(
@@ -1925,7 +2170,16 @@ async function validateKnowledgeStructure(
       if (!validPaths.has(entry.path)) {
         continue;
       }
-      issues.push(...(await validateKnowledgeEntrypoint(root, entry)));
+      const entrypointIssues = await validateKnowledgeEntrypoint(root, entry);
+      issues.push(...entrypointIssues);
+      if (canInspectFreshness && entrypointIssues.length === 0) {
+        const status = await inspectKnowledgeOverview(
+          root,
+          entry,
+          registry.entries,
+        );
+        if (status.issue) issues.push(status.issue);
+      }
     }
     return { issues, entries: registry.entries };
   } catch (error) {
@@ -2717,6 +2971,7 @@ async function assertMutationSafe(
   const allowed = new Set([
     "AIO-STRUCTURE-VIEW",
     "AIO-VIEW-DRIFT",
+    "AIO-KNOWLEDGE-STALE",
     ...allowedCodes,
   ]);
   const blocking = (await validateWorkspace(root)).filter(

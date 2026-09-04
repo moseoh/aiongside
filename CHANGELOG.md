@@ -9,6 +9,15 @@
 - Added `work knowledge add/remove` and Knowledge review targets to `done` dry-runs.
 - Kept legacy two-column Registry rows readable as top-level key paths.
 - Kept shared Knowledge outside individual work completion seals and automatic rewrites.
+- Added namespaced Knowledge Overview metadata and deterministic owned-content digests.
+- Added nearest-topic ownership boundaries that isolate nested registered topic content.
+- Added `knowledge list`, `tree`, `show`, and target-only `sync` with human and JSON output.
+- Added `AIO-KNOWLEDGE-STALE` validation, Stop Hook reporting, and linked Knowledge freshness gates for `done`.
+- Kept unrelated Work mutations available while Knowledge review is in progress.
+
+### Breaking changes
+
+- Existing registered Knowledge Overviews remain unchanged but report stale until each key is explicitly reviewed and synced.
 
 ## 0.2.1 - 2026-08-30
 

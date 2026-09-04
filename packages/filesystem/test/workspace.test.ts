@@ -29,7 +29,9 @@ import {
   confirmWork,
   createWork,
   discardWork,
+  getKnowledgeTree,
   initializeWorkspace,
+  listKnowledge,
   listWorks,
   loadAgentInstructionsSource,
   loadAgentSkillSource,
@@ -41,7 +43,9 @@ import {
   rebuildViews,
   removeWorkDependency,
   removeWorkKnowledge,
+  showKnowledge,
   syncAgentSkills,
+  syncKnowledgeOverview,
   syncWorkOverview,
   validateWorkspace,
 } from "../src/index.js";
@@ -122,6 +126,9 @@ ${entries
   .join("\n")}
 `,
   );
+  for (const entry of entries) {
+    await syncKnowledgeOverview(root, entry.key);
+  }
 }
 
 async function writeWorkFixture(root: string, id: string): Promise<void> {
@@ -297,7 +304,7 @@ describe("workspace lifecycle", () => {
       "utf8",
     );
 
-    expect(config).toContain("agentSkillVersion: 6");
+    expect(config).toContain("agentSkillVersion: 7");
     for (const target of [
       path.join(root, ".agents", "skills", "aiongside", "SKILL.md"),
       path.join(root, ".claude", "skills", "aiongside", "SKILL.md"),
@@ -375,7 +382,7 @@ describe("workspace lifecycle", () => {
     await mkdir(path.dirname(olderTarget), { recursive: true });
     await writeFile(
       olderTarget,
-      source.replace('aiongside-version: "6"', 'aiongside-version: "5"'),
+      source.replace('aiongside-version: "7"', 'aiongside-version: "6"'),
     );
     await initializeWorkspace(olderRoot);
     expect(await readFile(olderTarget, "utf8")).toBe(source);
@@ -416,8 +423,8 @@ describe("workspace lifecycle", () => {
       "SKILL.md",
     );
     const newer = source.replace(
-      'aiongside-version: "6"',
       'aiongside-version: "7"',
+      'aiongside-version: "8"',
     );
     await mkdir(path.dirname(newerTarget), { recursive: true });
     await writeFile(newerTarget, newer);
@@ -456,7 +463,7 @@ describe("workspace lifecycle", () => {
     const root = await workspace();
     const configPath = path.join(root, ".aiongside", "config.yaml");
     const legacyConfig = (await readFile(configPath, "utf8")).replace(
-      "agentSkillVersion: 6\n",
+      "agentSkillVersion: 7\n",
       "",
     );
     await writeFile(configPath, legacyConfig);
@@ -508,7 +515,7 @@ describe("workspace lifecycle", () => {
     );
     await writeFile(
       skillPath,
-      source.replace('aiongside-version: "6"', 'aiongside-version: "5"'),
+      source.replace('aiongside-version: "7"', 'aiongside-version: "6"'),
     );
     expect((await syncAgentSkills(root)).changes).toContainEqual({
       path: ".agents/skills/aiongside/SKILL.md",
@@ -520,8 +527,8 @@ describe("workspace lifecycle", () => {
     await writeFile(
       configPath,
       (await readFile(configPath, "utf8")).replace(
-        "agentSkillVersion: 6",
         "agentSkillVersion: 7",
+        "agentSkillVersion: 8",
       ),
     );
     const before = await readFile(skillPath, "utf8");
@@ -535,7 +542,7 @@ describe("workspace lifecycle", () => {
     const root = await workspace();
     const configPath = path.join(root, ".aiongside", "config.yaml");
     const legacyConfig = (await readFile(configPath, "utf8")).replace(
-      "agentSkillVersion: 6\n",
+      "agentSkillVersion: 7\n",
       "",
     );
     await writeFile(configPath, legacyConfig);
@@ -669,7 +676,7 @@ describe("workspace lifecycle", () => {
 
     await writeFile(
       agentsPath,
-      source.replace('aiongside-version: "6"', 'aiongside-version: "5"'),
+      source.replace('aiongside-version: "7"', 'aiongside-version: "6"'),
     );
     expect(await validateWorkspace(root)).toContainEqual(
       expect.objectContaining({ code: "AIO-SKILL-OUTDATED" }),
@@ -1188,6 +1195,230 @@ describe("workspace lifecycle", () => {
     expect(await readFile(recordPath)).toEqual(beforeAbsent);
   });
 
+  test("lists, trees, and shows Knowledge with current freshness", async () => {
+    const root = await workspace();
+    await registerKnowledge(root, [
+      {
+        key: "operations",
+        path: "company/operations",
+        displayName: "Operations",
+      },
+      {
+        key: "incident-response",
+        path: "company/operations/incidents",
+        parent: "operations",
+        displayName: "Incident response",
+      },
+    ]);
+
+    expect(await listKnowledge(root)).toEqual([
+      {
+        key: "incident-response",
+        displayName: "Incident response",
+        path: "company/operations/incidents",
+        parent: "operations",
+        children: [],
+        overview: "knowledge/company/operations/incidents/overview.md",
+        fresh: true,
+      },
+      {
+        key: "operations",
+        displayName: "Operations",
+        path: "company/operations",
+        parent: null,
+        children: ["incident-response"],
+        overview: "knowledge/company/operations/overview.md",
+        fresh: true,
+      },
+    ]);
+    expect((await getKnowledgeTree(root))[0]).toEqual(
+      expect.objectContaining({
+        key: "operations",
+        children: [expect.objectContaining({ key: "incident-response" })],
+      }),
+    );
+    expect(await showKnowledge(root, "INCIDENT-RESPONSE")).toEqual(
+      expect.objectContaining({
+        key: "incident-response",
+        parent: "operations",
+        fresh: true,
+      }),
+    );
+    await expect(showKnowledge(root, "missing")).rejects.toMatchObject({
+      code: "AIO-KNOWLEDGE-NOT-FOUND",
+    });
+  });
+
+  test("reports missing, stale, malformed, and mismatched Knowledge metadata", async () => {
+    const root = await workspace();
+    const directory = path.join(root, "knowledge", "operations");
+    const overviewPath = path.join(directory, "overview.md");
+    await mkdir(directory, { recursive: true });
+    await writeFile(overviewPath, "# Operations\n");
+    await writeFile(
+      path.join(root, "knowledge", "registry.md"),
+      "# Knowledge registry\n\n| Key | Display name |\n| --- | --- |\n| operations | Operations |\n",
+    );
+
+    expect(await validateWorkspace(root)).toContainEqual(
+      expect.objectContaining({
+        code: "AIO-KNOWLEDGE-STALE",
+        path: "knowledge/operations/overview.md",
+      }),
+    );
+    expect(await readFile(overviewPath, "utf8")).toBe("# Operations\n");
+
+    await syncKnowledgeOverview(root, "operations");
+    await writeFile(path.join(directory, "runbook.md"), "# Runbook\n");
+    expect(await validateWorkspace(root)).toContainEqual(
+      expect.objectContaining({ code: "AIO-KNOWLEDGE-STALE" }),
+    );
+
+    await writeFile(
+      overviewPath,
+      "---\naiongside:\n  schema: 2\n  key: operations\n  contentDigest: bad\n---\n\n# Operations\n",
+    );
+    expect(await validateWorkspace(root)).toContainEqual(
+      expect.objectContaining({ code: "AIO-KNOWLEDGE-OVERVIEW" }),
+    );
+
+    await writeFile(
+      overviewPath,
+      `---\naiongside:\n  schema: 1\n  key: another-key\n  contentDigest: "${"0".repeat(64)}"\n---\n\n# Operations\n`,
+    );
+    expect(await validateWorkspace(root)).toContainEqual(
+      expect.objectContaining({
+        code: "AIO-KNOWLEDGE-IDENTITY",
+        path: "knowledge/operations/overview.md",
+      }),
+    );
+  });
+
+  test("syncs only one Knowledge Overview and preserves user content", async () => {
+    const root = await workspace();
+    await registerKnowledge(root, [
+      {
+        key: "operations",
+        path: "operations",
+        displayName: "Operations",
+      },
+      {
+        key: "engineering",
+        path: "engineering",
+        displayName: "Engineering",
+      },
+    ]);
+    const operationsOverview = path.join(
+      root,
+      "knowledge",
+      "operations",
+      "overview.md",
+    );
+    const engineeringOverview = path.join(
+      root,
+      "knowledge",
+      "engineering",
+      "overview.md",
+    );
+    const managed = await readFile(operationsOverview, "utf8");
+    const digestMatch = /contentDigest: ([a-f0-9]{64})/.exec(managed);
+    const digest = digestMatch?.[1];
+    if (!digest) throw new Error("Missing test digest");
+    await writeFile(
+      operationsOverview,
+      `---\nowner: team-a\naiongside:\n  schema: 1\n  key: operations\n  contentDigest: ${digest}\n---\r\n\r\n# Operations\r\n\r\nRouting text.\r\n`,
+    );
+    await writeFile(
+      path.join(root, "knowledge", "operations", "runbook.md"),
+      "# Changed\n",
+    );
+    await writeFile(
+      path.join(root, "knowledge", "engineering", "standards.md"),
+      "# Changed\n",
+    );
+    const engineeringBefore = await readFile(engineeringOverview);
+
+    const synced = await syncKnowledgeOverview(root, "operations");
+    expect(synced).toEqual(
+      expect.objectContaining({
+        key: "operations",
+        changed: true,
+        fresh: true,
+      }),
+    );
+    const operationsAfter = await readFile(operationsOverview, "utf8");
+    expect(operationsAfter).toContain("owner: team-a");
+    expect(operationsAfter).toContain("# Operations\r\n\r\nRouting text.\r\n");
+    expect(await readFile(engineeringOverview)).toEqual(engineeringBefore);
+    expect((await showKnowledge(root, "operations")).fresh).toBe(true);
+    expect((await showKnowledge(root, "engineering")).fresh).toBe(false);
+    expect((await syncKnowledgeOverview(root, "operations")).changed).toBe(
+      false,
+    );
+  });
+
+  test("does not write when Knowledge sync cannot safely resolve its target", async () => {
+    const identityRoot = await workspace();
+    await registerKnowledge(identityRoot, [
+      {
+        key: "operations",
+        path: "operations",
+        displayName: "Operations",
+      },
+    ]);
+    const identityOverview = path.join(
+      identityRoot,
+      "knowledge",
+      "operations",
+      "overview.md",
+    );
+    const mismatched = (await readFile(identityOverview, "utf8")).replace(
+      "key: operations",
+      "key: engineering",
+    );
+    await writeFile(identityOverview, mismatched);
+    await expect(
+      syncKnowledgeOverview(identityRoot, "operations"),
+    ).rejects.toMatchObject({ code: "AIO-KNOWLEDGE-IDENTITY" });
+    expect(await readFile(identityOverview, "utf8")).toBe(mismatched);
+
+    const registryRoot = await workspace();
+    const registryPath = path.join(registryRoot, "knowledge", "registry.md");
+    await writeFile(registryPath, "# Broken Registry\n");
+    const registryBefore = await readFile(registryPath);
+    await expect(
+      syncKnowledgeOverview(registryRoot, "operations"),
+    ).rejects.toMatchObject({ code: "AIO-STRUCTURE-KNOWLEDGE-REGISTRY" });
+    expect(await readFile(registryPath)).toEqual(registryBefore);
+
+    for (const damage of ["path", "overview"] as const) {
+      const damagedRoot = await workspace();
+      await registerKnowledge(damagedRoot, [
+        {
+          key: "operations",
+          path: "operations",
+          displayName: "Operations",
+        },
+      ]);
+      const target = path.join(damagedRoot, "knowledge", "operations");
+      if (damage === "path") {
+        await rm(target, { recursive: true });
+      } else {
+        await rm(path.join(target, "overview.md"));
+      }
+      const beforeRegistry = await readFile(
+        path.join(damagedRoot, "knowledge", "registry.md"),
+      );
+      await expect(
+        syncKnowledgeOverview(damagedRoot, "operations"),
+      ).rejects.toMatchObject({ code: "AIO-WORKSPACE-INVALID" });
+      expect(
+        await readFile(path.join(damagedRoot, "knowledge", "registry.md")),
+      ).toEqual(beforeRegistry);
+      expect(await pathExists(path.join(target, "overview.md"))).toBe(false);
+    }
+  });
+
   test("validates Knowledge mutation targets and seals done Work", async () => {
     const root = await workspace();
     const work = await createWork(root, "Knowledge mutation gates");
@@ -1353,6 +1584,7 @@ describe("workspace lifecycle", () => {
           key: "incident-response",
           path: "operations/incident-response",
           overview: "knowledge/operations/incident-response/overview.md",
+          fresh: true,
         },
       ],
     });
@@ -1388,9 +1620,102 @@ describe("workspace lifecycle", () => {
         key: "operations",
         path: "operations",
         overview: "knowledge/operations/overview.md",
+        fresh: true,
       },
     ]);
     expect(repeated.canMove).toBe(false);
+  });
+
+  test("reports linked Knowledge freshness and gates only related completion", async () => {
+    const root = await workspace();
+    await registerKnowledge(root, [
+      {
+        key: "operations",
+        path: "operations",
+        displayName: "Operations",
+      },
+      {
+        key: "incident-response",
+        path: "operations/incidents",
+        parent: "operations",
+        displayName: "Incident response",
+      },
+      {
+        key: "engineering",
+        path: "engineering",
+        displayName: "Engineering",
+      },
+    ]);
+    const linked = await createWork(root, "Update durable guidance");
+    await addWorkKnowledge(root, linked.id, "incident-response");
+    await addWorkKnowledge(root, linked.id, "engineering");
+    await confirmWork(root, linked.id, [...allChecks]);
+    await writeFile(
+      path.join(root, "knowledge", "operations", "incidents", "runbook.md"),
+      "# Updated runbook\n",
+    );
+
+    const preview = await previewMoveWork(root, linked.id, "done");
+    expect(preview.knowledgeReview?.targets).toEqual([
+      expect.objectContaining({
+        key: "incident-response",
+        path: "operations/incidents",
+        fresh: false,
+      }),
+      expect.objectContaining({ key: "engineering", fresh: true }),
+    ]);
+    expect(preview.canMove).toBe(false);
+    await expect(moveWork(root, linked.id, "done")).rejects.toMatchObject({
+      code: "AIO-KNOWLEDGE-STALE",
+    });
+
+    await syncKnowledgeOverview(root, "incident-response");
+    expect((await moveWork(root, linked.id, "done")).metadata.status).toBe(
+      "done",
+    );
+
+    await writeFile(
+      path.join(root, "knowledge", "engineering", "standards.md"),
+      "# Changed later\n",
+    );
+    const unrelated = await createWork(root, "Unrelated delivery");
+    await confirmWork(root, unrelated.id, [...allChecks]);
+    expect((await moveWork(root, unrelated.id, "done")).metadata.status).toBe(
+      "done",
+    );
+    const codes = (await validateWorkspace(root)).map((issue) => issue.code);
+    expect(codes).toContain("AIO-KNOWLEDGE-STALE");
+    expect(codes).not.toContain("AIO-DONE-INVALIDATED");
+  });
+
+  test("allows non-completion Work mutations while Knowledge is stale", async () => {
+    const root = await workspace();
+    await registerKnowledge(root, [
+      {
+        key: "operations",
+        path: "operations",
+        displayName: "Operations",
+      },
+    ]);
+    await writeFile(
+      path.join(root, "knowledge", "operations", "changed.md"),
+      "# Changed\n",
+    );
+
+    const first = await createWork(root, "Continue during review");
+    const second = await createWork(root, "Dependency");
+    expect((await moveWork(root, first.id, "active")).metadata.status).toBe(
+      "active",
+    );
+    expect((await addWorkDependency(root, first.id, second.id)).changed).toBe(
+      true,
+    );
+    expect(
+      (await removeWorkDependency(root, first.id, second.id)).changed,
+    ).toBe(true);
+    expect((await addWorkKnowledge(root, first.id, "operations")).changed).toBe(
+      true,
+    );
   });
 
   test("previews required waiting inputs without writing", async () => {
@@ -1651,6 +1976,7 @@ describe("workspace lifecycle", () => {
     );
     await writeFile(overviewPath, "# Content Operations\n");
     await writeFile(guidePath, "# Publishing\n");
+    await syncKnowledgeOverview(root, "content-operations");
     const knowledgeTargets = [registryPath, overviewPath, guidePath];
     const beforeMutation = await Promise.all(
       knowledgeTargets.map((target) => readFile(target)),
@@ -1665,10 +1991,19 @@ describe("workspace lifecycle", () => {
     await confirmWork(root, work.id, [...allChecks]);
     await moveWork(root, work.id, "done");
 
-    await writeFile(overviewPath, "# Content Operations\n\nCurrent facts.\n");
+    await writeFile(
+      overviewPath,
+      (await readFile(overviewPath, "utf8")).replace(
+        "# Content Operations\n",
+        "# Content Operations\n\nCurrent facts.\n",
+      ),
+    );
+    expect(await validateWorkspace(root)).toEqual([]);
     await writeFile(guidePath, "# Publishing\n\nCurrent process.\n");
 
-    expect(await validateWorkspace(root)).toEqual([]);
+    expect(await validateWorkspace(root)).toContainEqual(
+      expect.objectContaining({ code: "AIO-KNOWLEDGE-STALE" }),
+    );
   });
 
   test("creates an initial seal for a legacy done record", async () => {
@@ -1979,6 +2314,9 @@ describe("workspace lifecycle", () => {
 `,
     );
 
+    await syncKnowledgeOverview(root, "operations");
+    await syncKnowledgeOverview(root, "incident-response");
+
     expect(await validateWorkspace(root)).toEqual([]);
   });
 
@@ -2068,6 +2406,8 @@ describe("workspace lifecycle", () => {
 | incident-response | operations/incident-response | operations | Incident response |
 `,
     );
+    await syncKnowledgeOverview(root, "operations");
+    await syncKnowledgeOverview(root, "incident-response");
     const recordPath = path.join(root, "work", work.id, "record.md");
     const source = await readFile(recordPath, "utf8");
     await writeFile(
@@ -2106,7 +2446,12 @@ describe("workspace lifecycle", () => {
     );
 
     const before = await readFile(path.join(root, "knowledge", "registry.md"));
-    expect(await validateWorkspace(root)).toEqual([]);
+    expect(await validateWorkspace(root)).toContainEqual(
+      expect.objectContaining({
+        code: "AIO-KNOWLEDGE-STALE",
+        path: "knowledge/operations/overview.md",
+      }),
+    );
     expect(await readFile(path.join(root, "knowledge", "registry.md"))).toEqual(
       before,
     );
