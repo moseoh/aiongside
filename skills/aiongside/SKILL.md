@@ -3,7 +3,7 @@ name: aiongside
 description: Manage local AIongside work records and generated views. Use when a workspace contains .aiongside/config.yaml or the user asks to initialize or operate an AIongside workspace.
 license: MIT
 metadata:
-  aiongside-version: "7"
+  aiongside-version: "8"
 ---
 
 # AIongside
@@ -32,6 +32,10 @@ Do not check for updates automatically. Run `aiongside update` only when the use
 - Remove dependency: `aiongside work needs remove <ID> <dependency-ID>`
 - Add Knowledge relationship: `aiongside work knowledge add <ID> <key>`
 - Remove Knowledge relationship: `aiongside work knowledge remove <ID> <key>`
+- Create or register Knowledge: `aiongside knowledge new <key> [--display-name <name>] [--path <path>] [--parent <key>]`
+- Preview Knowledge move: `aiongside knowledge move <key> --path <path> [--parent <key>|--no-parent] --dry-run --json`
+- Apply Knowledge move: `aiongside knowledge move <key> --path <path> [--parent <key>|--no-parent]`
+- Preview Knowledge discard: `aiongside knowledge discard <key> --dry-run`
 - List Knowledge: `aiongside knowledge list`
 - Browse the Knowledge hierarchy: `aiongside knowledge tree`
 - Show one Knowledge topic: `aiongside knowledge show <key>`
@@ -73,6 +77,12 @@ For an older workspace, review any `reports/` content and move delivery outputs 
 
 `knowledge/registry.md` is the workspace entry point for persistent Knowledge. Its managed table uses `Key`, `Path`, `Parent`, and `Display name`. `Key` is a stable, globally unique relationship identifier. `Path` locates the topic below `knowledge/`, `Parent` optionally names another registered key, and `Display name` is for people. Use `knowledge list`, `tree`, and `show` to explore topics on demand instead of loading every document.
 
+Use `aiongside knowledge new` to create a topic or register an existing unregistered directory. Choose the most specific stable key, path, parent, and display name. If existing content is adopted, review its Overview and owned content before running `aiongside knowledge sync <key>`.
+
+Before moving a topic, run the JSON dry-run and show the source, destination, moved keys, stale keys, and link warning to the user. Stop and wait for explicit approval. Apply the move with the same path and parent options only after approval. AIongside preserves keys and Work relationships but does not rewrite Markdown links.
+
+Before discarding a Knowledge topic, run `aiongside knowledge discard <key> --dry-run` and show its registered children, Work references, and recovery target. Stop and wait for explicit approval. Only then run `aiongside knowledge discard <key> --confirm <key>`. Discard is limited to unreferenced leaf topics and moves content to recoverable trash.
+
 Every registered path has an `overview.md`. Registered topics may be nested at any depth. Unregistered files and directories below a registered topic are user-owned internal content, not separate Knowledge relationships. A registered nested topic owns its own subtree; its contents do not make ancestors stale. Direct child registration changes require the parent Overview to be reviewed.
 
 Add a Work relationship only when the Work changes persistent Knowledge or requires it to be revalidated. Merely consulting a topic does not create a relationship. Add only the most specific registered key, never parent keys automatically. If the impact is unclear, ask the user.
@@ -84,6 +94,8 @@ After changing content owned by a registered topic:
 3. Run `aiongside knowledge sync <key>` only after completing that review.
 
 Never sync automatically or use sync as a substitute for reviewing content. Do not impose names, formats, or a fixed internal structure, and do not automatically rewrite, merge, move, or reorganize shared Knowledge. Shared Knowledge is outside every individual Work completion seal.
+
+Do not directly add, move, or remove Registry rows or registered Knowledge directories when a topic management command exists. Use the CLI so Registry and filesystem changes remain atomic.
 
 ## Discard
 

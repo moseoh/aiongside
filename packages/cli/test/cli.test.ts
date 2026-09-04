@@ -214,7 +214,15 @@ describe("CLI", () => {
     const root = await tempRoot();
     await cli(["init", root]);
     const help = await cli(["knowledge", "--help"]);
-    for (const command of ["list", "tree", "show", "sync"]) {
+    for (const command of [
+      "new",
+      "move",
+      "discard",
+      "list",
+      "tree",
+      "show",
+      "sync",
+    ]) {
       expect(help.stdout).toContain(command);
     }
     expect((await cli(["--root", root, "knowledge", "list"])).stdout).toBe(
@@ -289,6 +297,238 @@ describe("CLI", () => {
     });
   });
 
+  test("creates, previews moves, moves, and discards Knowledge", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    for (const command of ["new", "move", "discard"]) {
+      const help = await cli(["knowledge", command, "--help"]);
+      expect(help.stdout).toContain("--json");
+    }
+
+    const created = JSON.parse(
+      (
+        await cli([
+          "--root",
+          root,
+          "knowledge",
+          "new",
+          "operations",
+          "--display-name",
+          "Operations",
+          "--json",
+        ])
+      ).stdout,
+    ) as { key: string; fresh: boolean };
+    expect(created).toEqual(
+      expect.objectContaining({ key: "operations", fresh: true }),
+    );
+    const existingPath = path.join(root, "knowledge", "company", "handbook");
+    await mkdir(existingPath, { recursive: true });
+    await writeFile(
+      path.join(existingPath, "overview.md"),
+      "# Existing handbook\n",
+    );
+    const adopted = JSON.parse(
+      (
+        await cli([
+          "--root",
+          root,
+          "knowledge",
+          "new",
+          "handbook",
+          "--path",
+          "company/handbook",
+          "--json",
+        ])
+      ).stdout,
+    ) as { adopted: boolean; fresh: boolean };
+    expect(adopted).toEqual(
+      expect.objectContaining({ adopted: true, fresh: false }),
+    );
+    expect(await readFile(path.join(existingPath, "overview.md"), "utf8")).toBe(
+      "# Existing handbook\n",
+    );
+    const child = await cli([
+      "--root",
+      root,
+      "knowledge",
+      "new",
+      "incidents",
+      "--parent",
+      "operations",
+    ]);
+    expect(child.stdout).toContain("Created Knowledge — incidents");
+    expect(child.stdout).toContain("operations/incidents");
+
+    const registryPath = path.join(root, "knowledge", "registry.md");
+    const beforePreview = await readFile(registryPath);
+    const preview = JSON.parse(
+      (
+        await cli([
+          "--root",
+          root,
+          "knowledge",
+          "move",
+          "incidents",
+          "--path",
+          "incidents",
+          "--no-parent",
+          "--dry-run",
+          "--json",
+        ])
+      ).stdout,
+    ) as { applied: boolean; parent: string | null };
+    expect(preview).toEqual(
+      expect.objectContaining({ applied: false, parent: null }),
+    );
+    expect(await readFile(registryPath)).toEqual(beforePreview);
+
+    const moved = JSON.parse(
+      (
+        await cli([
+          "--root",
+          root,
+          "knowledge",
+          "move",
+          "incidents",
+          "--path",
+          "incidents",
+          "--no-parent",
+          "--json",
+        ])
+      ).stdout,
+    ) as { applied: boolean; destinationPath: string };
+    expect(moved).toEqual(
+      expect.objectContaining({ applied: true, destinationPath: "incidents" }),
+    );
+
+    const discardPreview = await cli([
+      "--root",
+      root,
+      "knowledge",
+      "discard",
+      "incidents",
+      "--dry-run",
+    ]);
+    expect(discardPreview.stdout).toContain("Discard preview — incidents");
+    expect(discardPreview.stdout).toContain("No changes made");
+    const discarded = JSON.parse(
+      (
+        await cli([
+          "--root",
+          root,
+          "knowledge",
+          "discard",
+          "incidents",
+          "--confirm",
+          "incidents",
+          "--json",
+        ])
+      ).stdout,
+    ) as { applied: boolean; trashTarget: string };
+    expect(discarded.applied).toBe(true);
+    expect(discarded.trashTarget).toContain(
+      ".aiongside/trash/knowledge/incidents-",
+    );
+  });
+
+  test("reports Knowledge option, target, conflict, and confirmation errors", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    await cli(["--root", root, "knowledge", "new", "operations"]);
+
+    await expect(
+      cli([
+        "--root",
+        root,
+        "knowledge",
+        "move",
+        "operations",
+        "--path",
+        "company/operations",
+        "--parent",
+        "operations",
+        "--no-parent",
+      ]),
+    ).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining("AIO-KNOWLEDGE-PARENT"),
+    });
+    await expect(
+      cli([
+        "--root",
+        root,
+        "knowledge",
+        "move",
+        "missing",
+        "--path",
+        "missing",
+      ]),
+    ).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining("AIO-KNOWLEDGE-NOT-FOUND"),
+    });
+    await expect(
+      cli(["--root", root, "knowledge", "new", "operations"]),
+    ).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining("AIO-KNOWLEDGE-CREATE-CONFLICT"),
+    });
+    await expect(
+      cli(["--root", root, "knowledge", "discard", "operations"]),
+    ).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining("AIO-KNOWLEDGE-DISCARD-CONFIRM"),
+    });
+    await cli([
+      "--root",
+      root,
+      "knowledge",
+      "new",
+      "incidents",
+      "--parent",
+      "operations",
+    ]);
+    await expect(
+      cli([
+        "--root",
+        root,
+        "knowledge",
+        "discard",
+        "operations",
+        "--confirm",
+        "operations",
+      ]),
+    ).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining("AIO-KNOWLEDGE-DISCARD-CHILDREN"),
+    });
+    await cli(["--root", root, "work", "new", "Knowledge reference"]);
+    await cli([
+      "--root",
+      root,
+      "work",
+      "knowledge",
+      "add",
+      "WORK-1",
+      "incidents",
+    ]);
+    await expect(
+      cli([
+        "--root",
+        root,
+        "knowledge",
+        "discard",
+        "incidents",
+        "--confirm",
+        "incidents",
+      ]),
+    ).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining("AIO-KNOWLEDGE-DISCARD-REFERENCED"),
+    });
+  });
+
   test("documents and runs Agent Skill sync", async () => {
     const root = await tempRoot();
     await cli(["init", root]);
@@ -299,7 +539,7 @@ describe("CLI", () => {
     await writeFile(
       configPath,
       (await readFile(configPath, "utf8")).replace(
-        "agentSkillVersion: 7\n",
+        "agentSkillVersion: 8\n",
         "",
       ),
     );
@@ -309,7 +549,7 @@ describe("CLI", () => {
     await mkdir(nested, { recursive: true });
 
     const synced = await cli(["--root", nested, "skill", "sync"]);
-    expect(synced.stdout).toContain("Agent integration synced (version 7)");
+    expect(synced.stdout).toContain("Agent integration synced (version 8)");
     expect(synced.stdout).toContain(
       "+ Created  .agents/skills/aiongside/SKILL.md",
     );
@@ -322,7 +562,7 @@ describe("CLI", () => {
 
     const noOp = await cli(["--root", root, "skill", "sync"]);
     expect(noOp.stdout).toContain(
-      "✓ Agent integration is current (version 7)\n",
+      "✓ Agent integration is current (version 8)\n",
     );
     expect(noOp.stdout).toContain("Approve project Hooks");
   });

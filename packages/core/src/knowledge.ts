@@ -44,6 +44,67 @@ export interface KnowledgeRegistry {
   entries: KnowledgeEntry[];
 }
 
+export type KnowledgeMutationErrorCode =
+  | "AIO-KNOWLEDGE-KEY"
+  | "AIO-KNOWLEDGE-PATH"
+  | "AIO-KNOWLEDGE-PARENT"
+  | "AIO-KNOWLEDGE-DISPLAY-NAME"
+  | "AIO-KNOWLEDGE-NOT-FOUND"
+  | "AIO-KNOWLEDGE-CREATE-CONFLICT"
+  | "AIO-KNOWLEDGE-MOVE-CONFLICT"
+  | "AIO-KNOWLEDGE-DISCARD-CHILDREN"
+  | "AIO-KNOWLEDGE-DISCARD-REFERENCED"
+  | "AIO-KNOWLEDGE-DISCARD-CONFIRM";
+
+export class KnowledgeMutationError extends Error {
+  constructor(
+    message: string,
+    readonly code: KnowledgeMutationErrorCode,
+  ) {
+    super(message);
+    this.name = "KnowledgeMutationError";
+  }
+}
+
+export interface KnowledgeCreateInput {
+  key: string;
+  displayName?: string;
+  path?: string;
+  parent?: string;
+}
+
+export interface KnowledgeCreatePlan {
+  entry: KnowledgeEntry;
+  entries: KnowledgeEntry[];
+  staleKeys: string[];
+}
+
+export interface KnowledgeMoveInput {
+  key: string;
+  path: string;
+  parent?: string | null;
+  preserveParent?: boolean;
+}
+
+export interface KnowledgeMovePlan {
+  key: string;
+  sourcePath: string;
+  destinationPath: string;
+  previousParent: string | null;
+  parent: string | null;
+  movedKeys: string[];
+  entries: KnowledgeEntry[];
+  staleKeys: string[];
+  warnings: string[];
+}
+
+export interface KnowledgeDiscardPlan {
+  entry: KnowledgeEntry;
+  childKeys: string[];
+  referencedBy: string[];
+  staleKeys: string[];
+}
+
 export interface KnowledgeRegistryProblem {
   code:
     | "AIO-KNOWLEDGE-KEY"
@@ -210,6 +271,187 @@ export function parseKnowledgeRegistry(source: string): KnowledgeRegistry {
   return { format: match.format, entries };
 }
 
+export function renderKnowledgeRegistry(
+  source: string,
+  entries: KnowledgeEntry[],
+): string {
+  parseKnowledgeRegistry(source);
+  const problem = validateKnowledgeRegistryEntries(entries)[0];
+  if (problem) {
+    throw new KnowledgeRegistryFormatError(problem.message);
+  }
+  const boundary = findRegistryTableBoundary(source);
+  const rows = [
+    `| ${CURRENT_HEADERS.join(" | ")} |`,
+    `| ${CURRENT_HEADERS.map(() => "---").join(" | ")} |`,
+    ...entries.map(
+      (entry) =>
+        `| ${escapeTableCell(entry.key)} | ${escapeTableCell(entry.path)} | ${escapeTableCell(entry.parent ?? "")} | ${escapeTableCell(entry.displayName)} |`,
+    ),
+  ];
+  return `${source.slice(0, boundary.start)}${rows.join(boundary.lineEnding)}${source.slice(boundary.end)}`;
+}
+
+export function planKnowledgeCreate(
+  entries: KnowledgeEntry[],
+  input: KnowledgeCreateInput,
+): KnowledgeCreatePlan {
+  const key = normalizeKnowledgeKey(input.key);
+  const parent = input.parent ? normalizeKnowledgeKey(input.parent) : undefined;
+  const parentEntry = parent
+    ? entries.find((entry) => entry.key === parent)
+    : undefined;
+  if (parent && !parentEntry) {
+    throw new KnowledgeMutationError(
+      `Knowledge parent does not exist: ${parent}`,
+      "AIO-KNOWLEDGE-PARENT",
+    );
+  }
+  const entryPath = normalizeKnowledgePath(
+    input.path ?? (parentEntry ? `${parentEntry.path}/${key}` : key),
+  );
+  const displayName =
+    input.displayName === undefined ? key : input.displayName.trim();
+  if (!displayName || /\r|\n/.test(displayName)) {
+    throw new KnowledgeMutationError(
+      "Knowledge display name must be a non-empty single line.",
+      "AIO-KNOWLEDGE-DISPLAY-NAME",
+    );
+  }
+  if (entries.some((entry) => entry.key === key)) {
+    throw new KnowledgeMutationError(
+      `Knowledge key is already registered: ${key}`,
+      "AIO-KNOWLEDGE-CREATE-CONFLICT",
+    );
+  }
+  if (entries.some((entry) => entry.path === entryPath)) {
+    throw new KnowledgeMutationError(
+      `Knowledge path is already registered: ${entryPath}`,
+      "AIO-KNOWLEDGE-CREATE-CONFLICT",
+    );
+  }
+  const entry: KnowledgeEntry = {
+    key,
+    path: entryPath,
+    ...(parent ? { parent } : {}),
+    displayName,
+    line: entries.length + 1,
+  };
+  const next = [...entries, entry];
+  assertValidMutationEntries(next);
+  return {
+    entry,
+    entries: next,
+    staleKeys: parent ? [parent] : [],
+  };
+}
+
+export function planKnowledgeMove(
+  entries: KnowledgeEntry[],
+  input: KnowledgeMoveInput,
+): KnowledgeMovePlan {
+  const key = normalizeKnowledgeKey(input.key);
+  const current = entries.find((entry) => entry.key === key);
+  if (!current) {
+    throw new KnowledgeMutationError(
+      `Knowledge key does not exist: ${key}`,
+      "AIO-KNOWLEDGE-NOT-FOUND",
+    );
+  }
+  const destinationPath = normalizeKnowledgePath(input.path);
+  if (destinationPath.startsWith(`${current.path}/`)) {
+    throw new KnowledgeMutationError(
+      `Knowledge destination is inside its source: ${destinationPath}`,
+      "AIO-KNOWLEDGE-MOVE-CONFLICT",
+    );
+  }
+  const parent = input.preserveParent
+    ? current.parent
+    : input.parent === null
+      ? undefined
+      : input.parent
+        ? normalizeKnowledgeKey(input.parent)
+        : current.parent;
+  const moved = entries.filter(
+    (entry) =>
+      entry.path === current.path || entry.path.startsWith(`${current.path}/`),
+  );
+  const movedKeys = new Set(moved.map((entry) => entry.key));
+  if (
+    entries.some(
+      (entry) =>
+        !movedKeys.has(entry.key) &&
+        (entry.path === destinationPath ||
+          entry.path.startsWith(`${destinationPath}/`)),
+    )
+  ) {
+    throw new KnowledgeMutationError(
+      `Knowledge destination conflicts with a registered path: ${destinationPath}`,
+      "AIO-KNOWLEDGE-MOVE-CONFLICT",
+    );
+  }
+  const next = entries.map((entry) => {
+    if (!movedKeys.has(entry.key)) return entry;
+    const suffix = entry.path.slice(current.path.length);
+    const updated: KnowledgeEntry = {
+      ...entry,
+      path: `${destinationPath}${suffix}`,
+    };
+    if (entry.key === key) {
+      if (parent) updated.parent = parent;
+      else delete updated.parent;
+    }
+    return updated;
+  });
+  assertValidMutationEntries(next, "AIO-KNOWLEDGE-MOVE-CONFLICT");
+  const staleKeys = new Set<string>();
+  if (current.parent) staleKeys.add(current.parent);
+  if (parent) staleKeys.add(parent);
+  for (const entry of moved) {
+    if (entry.parent && movedKeys.has(entry.parent))
+      staleKeys.add(entry.parent);
+  }
+  return {
+    key,
+    sourcePath: current.path,
+    destinationPath,
+    previousParent: current.parent ?? null,
+    parent: parent ?? null,
+    movedKeys: moved.map((entry) => entry.key),
+    entries: next,
+    staleKeys: [...staleKeys].sort(),
+    warnings: ["Markdown links are not rewritten."],
+  };
+}
+
+export function planKnowledgeDiscard(
+  entries: KnowledgeEntry[],
+  keyValue: string,
+  referencedBy: string[] = [],
+): KnowledgeDiscardPlan {
+  const key = normalizeKnowledgeKey(keyValue);
+  const entry = entries.find((candidate) => candidate.key === key);
+  if (!entry) {
+    throw new KnowledgeMutationError(
+      `Knowledge key does not exist: ${key}`,
+      "AIO-KNOWLEDGE-NOT-FOUND",
+    );
+  }
+  const childKeys = entries
+    .filter(
+      (candidate) =>
+        candidate.key !== key && candidate.path.startsWith(`${entry.path}/`),
+    )
+    .map((candidate) => candidate.key)
+    .sort();
+  return {
+    entry,
+    childKeys,
+    referencedBy: [...new Set(referencedBy)].sort(),
+    staleKeys: entry.parent ? [entry.parent] : [],
+  };
+}
+
 export function validateKnowledgeRegistryEntries(
   entries: KnowledgeEntry[],
 ): KnowledgeRegistryProblem[] {
@@ -328,6 +570,105 @@ export function knowledgeEntriesByKey(
   entries: KnowledgeEntry[],
 ): Map<string, KnowledgeEntry> {
   return new Map(entries.map((entry) => [entry.key, entry]));
+}
+
+export function normalizeKnowledgePath(value: string): string {
+  const normalized = value.trim();
+  if (!isValidKnowledgePath(normalized)) {
+    throw new KnowledgeMutationError(
+      `Invalid Knowledge path: ${normalized || "<empty>"}`,
+      "AIO-KNOWLEDGE-PATH",
+    );
+  }
+  return normalized;
+}
+
+function normalizeKnowledgeKey(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (!knowledgeKeySchema.safeParse(normalized).success) {
+    throw new KnowledgeMutationError(
+      `Invalid Knowledge key: ${normalized || "<empty>"}`,
+      "AIO-KNOWLEDGE-KEY",
+    );
+  }
+  return normalized;
+}
+
+function assertValidMutationEntries(
+  entries: KnowledgeEntry[],
+  fallbackCode?: KnowledgeMutationErrorCode,
+): void {
+  const problem = validateKnowledgeRegistryEntries(entries)[0];
+  if (problem) {
+    throw new KnowledgeMutationError(
+      problem.message,
+      fallbackCode ?? problem.code,
+    );
+  }
+}
+
+function findRegistryTableBoundary(source: string): {
+  start: number;
+  end: number;
+  lineEnding: string;
+} {
+  const lines: Array<{
+    text: string;
+    start: number;
+    endWithoutEnding: number;
+    ending: string;
+  }> = [];
+  const pattern = /[^\r\n]*(?:\r\n|\n|$)/g;
+  let match = pattern.exec(source);
+  while (match !== null) {
+    const raw = match[0];
+    if (raw === "" && match.index === source.length) break;
+    const ending = raw.endsWith("\r\n")
+      ? "\r\n"
+      : raw.endsWith("\n")
+        ? "\n"
+        : "";
+    lines.push({
+      text: ending ? raw.slice(0, -ending.length) : raw,
+      start: match.index,
+      endWithoutEnding: match.index + raw.length - ending.length,
+      ending,
+    });
+    match = pattern.exec(source);
+  }
+  const headers = lines
+    .map((line, index) => ({ cells: parseTableRow(line.text), index }))
+    .filter(
+      (item) =>
+        item.cells &&
+        (sameCells(item.cells, CURRENT_HEADERS) ||
+          sameCells(item.cells, LEGACY_HEADERS)),
+    );
+  const header = headers[0];
+  if (!header) {
+    throw new KnowledgeRegistryFormatError("Cannot resolve Registry table.");
+  }
+  let last = header.index + 1;
+  while (
+    last + 1 < lines.length &&
+    parseTableRow(lines[last + 1]?.text ?? "")
+  ) {
+    last += 1;
+  }
+  const firstLine = lines[header.index];
+  const lastLine = lines[last];
+  if (!firstLine || !lastLine) {
+    throw new KnowledgeRegistryFormatError("Cannot resolve Registry table.");
+  }
+  return {
+    start: firstLine.start,
+    end: lastLine.endWithoutEnding,
+    lineEnding: firstLine.ending || (source.includes("\r\n") ? "\r\n" : "\n"),
+  };
+}
+
+function escapeTableCell(value: string): string {
+  return value.replaceAll("|", "\\|");
 }
 
 function parseTableRow(line: string): string[] | undefined {

@@ -10,7 +10,10 @@ import {
   addWorkKnowledge,
   cancelWork,
   confirmWork,
+  createKnowledge,
   createWork,
+  type DiscardKnowledgePreview,
+  discardKnowledge,
   discardWork,
   findWorkspaceRoot,
   getKnowledgeTree,
@@ -19,8 +22,11 @@ import {
   listKnowledge,
   type MoveWorkOptions,
   type MoveWorkResult,
+  moveKnowledge,
   moveWork,
   previewDiscard,
+  previewDiscardKnowledge,
+  previewMoveKnowledge,
   previewMoveWork,
   readAgentSessionContext,
   rebuildViews,
@@ -48,6 +54,20 @@ const cliVersion = (
 
 interface GlobalOptions {
   root?: string;
+}
+
+class NamedOption extends Option {
+  constructor(
+    flags: string,
+    description: string,
+    private readonly optionName: string,
+  ) {
+    super(flags, description);
+  }
+
+  override attributeName(): string {
+    return this.optionName;
+  }
 }
 
 const HOOK_TRUST_NOTICE =
@@ -400,7 +420,156 @@ export function createProgram(): Command {
 
   const knowledge = program
     .command("knowledge")
-    .description("Explore and sync registered Knowledge");
+    .description("Create, move, discard, explore, and sync Knowledge");
+
+  knowledge
+    .command("new")
+    .description("Create a Knowledge topic or register an existing directory")
+    .argument("<key>", "Globally unique Knowledge key")
+    .option("--display-name <name>", "Human-readable topic name")
+    .option("--path <path>", "Path relative to knowledge/")
+    .option("--parent <key>", "Registered parent Knowledge key")
+    .option("--json", "Print a structured creation result")
+    .action(
+      async (
+        key: string,
+        options: {
+          displayName?: string;
+          path?: string;
+          parent?: string;
+          json?: boolean;
+        },
+      ) => {
+        const root = await commandRoot(program);
+        const result = await createKnowledge(root, {
+          key,
+          ...(options.displayName ? { displayName: options.displayName } : {}),
+          ...(options.path ? { path: options.path } : {}),
+          ...(options.parent ? { parent: options.parent } : {}),
+        });
+        if (options.json) {
+          ui.json(result, true);
+          return;
+        }
+        ui.success(
+          `${result.adopted ? "Registered" : "Created"} Knowledge — ${result.key}`,
+        );
+        ui.rows([
+          { label: "Path", detail: result.path },
+          { label: "Parent", detail: result.parent ?? "—" },
+          { label: "Overview", detail: result.overview },
+          {
+            status: result.fresh ? "success" : "warning",
+            label: "Freshness",
+            detail: result.fresh ? "fresh" : "stale",
+          },
+        ]);
+        writeKnowledgeStaleHint(result.staleKeys);
+      },
+    );
+
+  knowledge
+    .command("move")
+    .description("Move a Knowledge topic and its physical subtree")
+    .argument("<key>", "Registered Knowledge key")
+    .requiredOption("--path <path>", "New path relative to knowledge/")
+    .option("--parent <key>", "Set a registered parent Knowledge key")
+    .addOption(
+      new NamedOption(
+        "--no-parent",
+        "Move the topic to the top-level hierarchy",
+        "noParent",
+      ).default(undefined),
+    )
+    .option("--dry-run", "Show move effects without writing")
+    .option("--json", "Print a structured move result")
+    .action(
+      async (
+        key: string,
+        options: {
+          path: string;
+          parent?: string;
+          noParent?: boolean;
+          dryRun?: boolean;
+          json?: boolean;
+        },
+      ) => {
+        const root = await commandRoot(program);
+        const noParent = options.noParent === false;
+        const parent = options.parent;
+        if (parent && noParent) {
+          throw new WorkspaceError(
+            "Use either --parent or --no-parent, not both.",
+            "AIO-KNOWLEDGE-PARENT",
+          );
+        }
+        const moveOptions = noParent
+          ? { parent: null }
+          : parent
+            ? { parent }
+            : { preserveParent: true };
+        const result = options.dryRun
+          ? await previewMoveKnowledge(root, key, options.path, moveOptions)
+          : await moveKnowledge(root, key, options.path, moveOptions);
+        if (options.json) {
+          ui.json(result, true);
+          return;
+        }
+        ui[options.dryRun ? "info" : "success"](
+          `${options.dryRun ? "Move preview" : "Moved Knowledge"} — ${result.key}`,
+        );
+        ui.rows([
+          { label: "Source", detail: result.sourcePath },
+          { label: "Destination", detail: result.destinationPath },
+          { label: "Parent", detail: result.parent ?? "—" },
+          { label: "Moved keys", detail: result.movedKeys.join(", ") },
+        ]);
+        for (const warning of result.warnings) ui.warning(warning);
+        writeKnowledgeStaleHint(result.staleKeys);
+        if (options.dryRun) ui.summary("No changes made");
+      },
+    );
+
+  knowledge
+    .command("discard")
+    .description("Move a leaf Knowledge topic to recoverable trash")
+    .argument("<key>", "Registered Knowledge key")
+    .option("--dry-run", "Show discard effects without writing")
+    .option("--confirm <key>", "Confirm the exact normalized key")
+    .option("--json", "Print a structured discard result")
+    .action(
+      async (
+        key: string,
+        options: { dryRun?: boolean; confirm?: string; json?: boolean },
+      ) => {
+        const root = await commandRoot(program);
+        if (options.dryRun) {
+          const result = await previewDiscardKnowledge(root, key);
+          if (options.json) {
+            ui.json({ ...result, applied: false }, true);
+            return;
+          }
+          ui.info(`Discard preview — ${result.key}`);
+          writeKnowledgeDiscardRows(result);
+          ui.summary("No changes made");
+          return;
+        }
+        if (!options.confirm) {
+          throw new WorkspaceError(
+            `Run \`aiongside knowledge discard ${key} --dry-run\`, review the result, then use --confirm ${key.trim().toLowerCase()}.`,
+            "AIO-KNOWLEDGE-DISCARD-CONFIRM",
+          );
+        }
+        const result = await discardKnowledge(root, key, options.confirm);
+        if (options.json) {
+          ui.json(result, true);
+          return;
+        }
+        ui.success(`Discarded Knowledge — ${result.key}`);
+        writeKnowledgeDiscardRows(result);
+        writeKnowledgeStaleHint(result.staleKeys);
+      },
+    );
 
   knowledge
     .command("list")
@@ -548,6 +717,31 @@ function flattenKnowledgeTree(
       detail: `${node.path} — ${node.fresh ? "fresh" : "stale"}`,
     },
     ...flattenKnowledgeTree(node.children, depth + 1),
+  ]);
+}
+
+function writeKnowledgeStaleHint(keys: string[]): void {
+  if (keys.length === 0) return;
+  ui.warning(`Knowledge review required — ${keys.join(", ")}`);
+  ui.hint(
+    `Review each Overview and owned content, then run ${keys.map((key) => `\`aiongside knowledge sync ${key}\``).join(", ")}.`,
+  );
+}
+
+function writeKnowledgeDiscardRows(result: DiscardKnowledgePreview): void {
+  ui.rows([
+    { label: "Path", detail: result.path },
+    {
+      status: result.childKeys.length > 0 ? "warning" : "info",
+      label: "Child keys",
+      detail: result.childKeys.join(", ") || "—",
+    },
+    {
+      status: result.referencedBy.length > 0 ? "warning" : "info",
+      label: "Referenced by",
+      detail: result.referencedBy.join(", ") || "—",
+    },
+    { label: "Recovery", detail: result.trashTarget },
   ]);
 }
 

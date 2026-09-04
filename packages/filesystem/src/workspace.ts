@@ -7,6 +7,7 @@ import {
   readFile,
   rename,
   rm,
+  rmdir,
   stat,
 } from "node:fs/promises";
 import path from "node:path";
@@ -24,7 +25,10 @@ import {
   isExactAgentSkillSource,
   isMovableStatus,
   isWorkCheck,
+  type KnowledgeCreateInput,
+  type KnowledgeDiscardPlan,
   type KnowledgeEntry,
+  KnowledgeMutationError,
   KnowledgeOverviewFormatError,
   KnowledgeRegistryFormatError,
   knowledgeEntriesByKey,
@@ -33,6 +37,10 @@ import {
   parseKnowledgeOverviewDocument,
   parseKnowledgeRegistry,
   parseMarkdownDocument,
+  planKnowledgeCreate,
+  planKnowledgeDiscard,
+  planKnowledgeMove,
+  renderKnowledgeRegistry,
   renderViews,
   replaceMarkdownMetadata,
   TEMPLATE_DEFINITIONS,
@@ -156,6 +164,55 @@ export interface SyncKnowledgeOverviewResult {
   path: string;
   overview: string;
   fresh: true;
+}
+
+export interface CreateKnowledgeResult {
+  key: string;
+  path: string;
+  parent: string | null;
+  displayName: string;
+  overview: string;
+  fresh: boolean;
+  adopted: boolean;
+  changes: string[];
+  staleKeys: string[];
+}
+
+export interface MoveKnowledgeOptions {
+  parent?: string | null;
+  preserveParent?: boolean;
+}
+
+export interface MoveKnowledgeResult {
+  key: string;
+  sourcePath: string;
+  destinationPath: string;
+  previousParent: string | null;
+  parent: string | null;
+  movedKeys: string[];
+  staleKeys: string[];
+  warnings: string[];
+  applied: boolean;
+  overview: string;
+}
+
+export interface DiscardKnowledgePreview {
+  key: string;
+  path: string;
+  childKeys: string[];
+  referencedBy: string[];
+  trashTarget: string;
+  staleKeys: string[];
+}
+
+export interface DiscardKnowledgeResult extends DiscardKnowledgePreview {
+  applied: true;
+  registryEntry: {
+    key: string;
+    path: string;
+    parent: string | null;
+    displayName: string;
+  };
 }
 
 export interface SyncOverviewResult {
@@ -1724,6 +1781,300 @@ function dependencyIssueKey(issue: ValidationIssue): string {
   return `${issue.code}\0${issue.message}`;
 }
 
+export async function createKnowledge(
+  root: string,
+  input: KnowledgeCreateInput,
+): Promise<CreateKnowledgeResult> {
+  return withWorkspaceLock(root, async () => {
+    await assertMutationSafe(root);
+    const registry = await loadKnowledgeRegistry(root);
+    const plan = resolveKnowledgePlan(() =>
+      planKnowledgeCreate(registry.entries, input),
+    );
+    const entry = plan.entry;
+    const knowledgeRoot = path.join(root, "knowledge");
+    const destination = path.join(knowledgeRoot, ...entry.path.split("/"));
+    await assertKnowledgePathSafe(
+      knowledgeRoot,
+      entry.path,
+      "AIO-KNOWLEDGE-CREATE-CONFLICT",
+      true,
+    );
+    const targetState = await inspectPath(destination);
+    if (targetState === "other" || targetState === "symlink") {
+      throw new WorkspaceError(
+        `Knowledge path conflicts with a non-directory entry: knowledge/${entry.path}`,
+        "AIO-KNOWLEDGE-CREATE-CONFLICT",
+      );
+    }
+    const adopted = targetState === "directory";
+    const overviewPath = path.join(destination, OVERVIEW_NAME);
+    const overviewState = adopted ? await inspectPath(overviewPath) : "missing";
+    if (overviewState !== "missing" && overviewState !== "file") {
+      throw new WorkspaceError(
+        `Knowledge Overview conflicts with an existing entry: knowledge/${entry.path}/${OVERVIEW_NAME}`,
+        "AIO-KNOWLEDGE-CREATE-CONFLICT",
+      );
+    }
+
+    const previousRegistry = registry.source;
+    const nextRegistry = renderKnowledgeRegistry(
+      previousRegistry,
+      plan.entries,
+    );
+    const createdParents = await missingDirectoryChain(
+      knowledgeRoot,
+      path.dirname(destination),
+    );
+    let createdDirectory = false;
+    let createdOverview = false;
+    let staleKeys: string[] = [];
+    try {
+      await mkdir(destination, { recursive: true });
+      createdDirectory = !adopted;
+      if (overviewState === "missing") {
+        const body = `# ${entry.displayName}\n`;
+        const source = adopted
+          ? body
+          : formatKnowledgeOverviewDocument(body, {
+              schema: 1,
+              key: entry.key,
+              contentDigest: await calculateKnowledgeContentDigest(
+                root,
+                entry,
+                plan.entries,
+              ),
+            });
+        await atomicWrite(overviewPath, source);
+        createdOverview = true;
+      }
+      await atomicWrite(registry.path, nextRegistry);
+      staleKeys = await collectStaleKnowledgeKeys(root, plan.entries);
+    } catch (error) {
+      await restoreCreatedKnowledgePath({
+        destination,
+        overviewPath,
+        createdDirectory,
+        createdOverview,
+        createdParents,
+      });
+      if ((await readOptionalFile(registry.path)) !== previousRegistry) {
+        await atomicWrite(registry.path, previousRegistry);
+      }
+      throw error;
+    }
+    return {
+      key: entry.key,
+      path: entry.path,
+      parent: entry.parent ?? null,
+      displayName: entry.displayName,
+      overview: knowledgeOverviewPath(entry),
+      fresh: !staleKeys.includes(entry.key),
+      adopted,
+      changes: [
+        `knowledge/registry.md#${entry.key}`,
+        ...(createdDirectory ? [`knowledge/${entry.path}/`] : []),
+        ...(createdOverview ? [knowledgeOverviewPath(entry)] : []),
+      ],
+      staleKeys,
+    };
+  });
+}
+
+export async function previewMoveKnowledge(
+  root: string,
+  key: string,
+  destinationPath: string,
+  options: MoveKnowledgeOptions = {},
+): Promise<MoveKnowledgeResult> {
+  await assertMutationSafe(root);
+  const registry = await loadKnowledgeRegistry(root);
+  const plan = resolveKnowledgePlan(() =>
+    planKnowledgeMove(registry.entries, {
+      key,
+      path: destinationPath,
+      ...(options.parent !== undefined ? { parent: options.parent } : {}),
+      preserveParent: options.preserveParent ?? options.parent === undefined,
+    }),
+  );
+  await assertMovePathsSafe(root, plan.sourcePath, plan.destinationPath);
+  return {
+    ...plan,
+    applied: false,
+    overview: `knowledge/${plan.destinationPath}/${OVERVIEW_NAME}`,
+  };
+}
+
+export async function moveKnowledge(
+  root: string,
+  key: string,
+  destinationPath: string,
+  options: MoveKnowledgeOptions = {},
+): Promise<MoveKnowledgeResult> {
+  return withWorkspaceLock(root, async () => {
+    await assertMutationSafe(root);
+    const registry = await loadKnowledgeRegistry(root);
+    const plan = resolveKnowledgePlan(() =>
+      planKnowledgeMove(registry.entries, {
+        key,
+        path: destinationPath,
+        ...(options.parent !== undefined ? { parent: options.parent } : {}),
+        preserveParent: options.preserveParent ?? options.parent === undefined,
+      }),
+    );
+    await assertMovePathsSafe(root, plan.sourcePath, plan.destinationPath);
+    const source = path.join(root, "knowledge", ...plan.sourcePath.split("/"));
+    const destination = path.join(
+      root,
+      "knowledge",
+      ...plan.destinationPath.split("/"),
+    );
+    const previousRegistry = registry.source;
+    const nextRegistry = renderKnowledgeRegistry(
+      previousRegistry,
+      plan.entries,
+    );
+    const createdParents = await missingDirectoryChain(
+      path.join(root, "knowledge"),
+      path.dirname(destination),
+    );
+    let moved = false;
+    let staleKeys: string[] = [];
+    try {
+      await mkdir(path.dirname(destination), { recursive: true });
+      await rename(source, destination);
+      moved = true;
+      await atomicWrite(registry.path, nextRegistry);
+      staleKeys = await collectStaleKnowledgeKeys(root, plan.entries);
+    } catch (error) {
+      if ((await readOptionalFile(registry.path)) !== previousRegistry) {
+        await atomicWrite(registry.path, previousRegistry);
+      }
+      if (moved) await rename(destination, source);
+      await removeEmptyDirectories(createdParents);
+      throw error;
+    }
+    return {
+      ...plan,
+      staleKeys,
+      applied: true,
+      overview: `knowledge/${plan.destinationPath}/${OVERVIEW_NAME}`,
+    };
+  });
+}
+
+export async function previewDiscardKnowledge(
+  root: string,
+  key: string,
+): Promise<DiscardKnowledgePreview> {
+  await assertMutationSafe(root);
+  const registry = await loadKnowledgeRegistry(root);
+  const works = await listWorks(root);
+  const referencedBy = works
+    .filter((work) =>
+      work.metadata.knowledge.includes(key.trim().toLowerCase()),
+    )
+    .map((work) => work.metadata.id);
+  const plan = resolveKnowledgePlan(() =>
+    planKnowledgeDiscard(registry.entries, key, referencedBy),
+  );
+  return discardKnowledgePreview(plan);
+}
+
+export async function discardKnowledge(
+  root: string,
+  key: string,
+  confirmation: string,
+): Promise<DiscardKnowledgeResult> {
+  const normalizedKey = key.trim().toLowerCase();
+  if (confirmation.trim() !== normalizedKey) {
+    throw new WorkspaceError(
+      `Confirmation does not match. Use --confirm ${normalizedKey}.`,
+      "AIO-KNOWLEDGE-DISCARD-CONFIRM",
+    );
+  }
+  return withWorkspaceLock(root, async () => {
+    await assertMutationSafe(root);
+    const registry = await loadKnowledgeRegistry(root);
+    const works = await listWorks(root);
+    const referencedBy = works
+      .filter((work) => work.metadata.knowledge.includes(normalizedKey))
+      .map((work) => work.metadata.id);
+    const plan = resolveKnowledgePlan(() =>
+      planKnowledgeDiscard(registry.entries, normalizedKey, referencedBy),
+    );
+    if (plan.childKeys.length > 0) {
+      throw new WorkspaceError(
+        `Cannot discard Knowledge with registered children: ${plan.childKeys.join(", ")}`,
+        "AIO-KNOWLEDGE-DISCARD-CHILDREN",
+      );
+    }
+    if (plan.referencedBy.length > 0) {
+      throw new WorkspaceError(
+        `Cannot discard Knowledge referenced by Work: ${plan.referencedBy.join(", ")}`,
+        "AIO-KNOWLEDGE-DISCARD-REFERENCED",
+      );
+    }
+    const source = path.join(root, "knowledge", ...plan.entry.path.split("/"));
+    await assertKnowledgePathSafe(
+      path.join(root, "knowledge"),
+      plan.entry.path,
+      "AIO-KNOWLEDGE-CREATE-CONFLICT",
+      false,
+    );
+    const timestamp = new Date().toISOString().replaceAll(/[:.]/g, "-");
+    const trashRelative = `.aiongside/trash/knowledge/${plan.entry.key}-${timestamp}`;
+    const trashEntry = path.join(root, ...trashRelative.split("/"));
+    const content = path.join(trashEntry, "content");
+    const metadataPath = path.join(trashEntry, "recovery.yaml");
+    const previousRegistry = registry.source;
+    const nextEntries = registry.entries.filter(
+      (entry) => entry.key !== plan.entry.key,
+    );
+    const nextRegistry = renderKnowledgeRegistry(previousRegistry, nextEntries);
+    let moved = false;
+    let staleKeys: string[] = [];
+    try {
+      await mkdir(trashEntry, { recursive: true });
+      await rename(source, content);
+      moved = true;
+      await atomicWrite(
+        metadataPath,
+        stringifyYaml(
+          {
+            schema: 1,
+            key: plan.entry.key,
+            path: plan.entry.path,
+            parent: plan.entry.parent ?? null,
+            displayName: plan.entry.displayName,
+          },
+          { lineWidth: 0 },
+        ),
+      );
+      await atomicWrite(registry.path, nextRegistry);
+      staleKeys = await collectStaleKnowledgeKeys(root, nextEntries);
+    } catch (error) {
+      if ((await readOptionalFile(registry.path)) !== previousRegistry) {
+        await atomicWrite(registry.path, previousRegistry);
+      }
+      if (moved) await rename(content, source);
+      await rm(trashEntry, { recursive: true, force: true });
+      throw error;
+    }
+    return {
+      ...discardKnowledgePreview(plan, trashRelative),
+      staleKeys,
+      applied: true,
+      registryEntry: {
+        key: plan.entry.key,
+        path: plan.entry.path,
+        parent: plan.entry.parent ?? null,
+        displayName: plan.entry.displayName,
+      },
+    };
+  });
+}
+
 async function writeWorkMetadataMutation(
   root: string,
   works: LoadedWork[],
@@ -1946,12 +2297,20 @@ function knowledgeOverviewPath(entry: KnowledgeEntry): string {
 }
 
 async function loadKnowledgeEntries(root: string): Promise<KnowledgeEntry[]> {
+  return (await loadKnowledgeRegistry(root)).entries;
+}
+
+async function loadKnowledgeRegistry(root: string): Promise<{
+  path: string;
+  source: string;
+  entries: KnowledgeEntry[];
+}> {
   const registryPath = path.join(root, "knowledge", "registry.md");
+  let source: string;
   let entries: KnowledgeEntry[];
   try {
-    entries = parseKnowledgeRegistry(
-      await readFile(registryPath, "utf8"),
-    ).entries;
+    source = await readFile(registryPath, "utf8");
+    entries = parseKnowledgeRegistry(source).entries;
   } catch (error) {
     throw new WorkspaceError(
       `Cannot read Knowledge Registry: ${errorMessage(error)}`,
@@ -1962,7 +2321,158 @@ async function loadKnowledgeEntries(root: string): Promise<KnowledgeEntry[]> {
   if (problem) {
     throw new WorkspaceError(problem.message, problem.code);
   }
-  return entries;
+  return { path: registryPath, source, entries };
+}
+
+type ExistingPathKind = "missing" | "directory" | "file" | "symlink" | "other";
+
+async function inspectPath(target: string): Promise<ExistingPathKind> {
+  try {
+    const metadata = await lstat(target);
+    if (metadata.isSymbolicLink()) return "symlink";
+    if (metadata.isDirectory()) return "directory";
+    if (metadata.isFile()) return "file";
+    return "other";
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return "missing";
+    throw error;
+  }
+}
+
+async function assertKnowledgePathSafe(
+  knowledgeRoot: string,
+  relativePath: string,
+  code: string,
+  allowMissing: boolean,
+): Promise<void> {
+  let current = knowledgeRoot;
+  for (const segment of relativePath.split("/")) {
+    current = path.join(current, segment);
+    const kind = await inspectPath(current);
+    if (kind === "missing" && allowMissing) return;
+    if (kind !== "directory") {
+      throw new WorkspaceError(
+        `Knowledge path is not a regular directory: ${relativePath}`,
+        code,
+      );
+    }
+  }
+}
+
+async function assertMovePathsSafe(
+  root: string,
+  sourcePath: string,
+  destinationPath: string,
+): Promise<void> {
+  const knowledgeRoot = path.join(root, "knowledge");
+  await assertKnowledgePathSafe(
+    knowledgeRoot,
+    sourcePath,
+    "AIO-KNOWLEDGE-MOVE-CONFLICT",
+    false,
+  );
+  await assertKnowledgePathSafe(
+    knowledgeRoot,
+    destinationPath,
+    "AIO-KNOWLEDGE-MOVE-CONFLICT",
+    true,
+  );
+  if (
+    (await inspectPath(
+      path.join(knowledgeRoot, ...destinationPath.split("/")),
+    )) !== "missing"
+  ) {
+    throw new WorkspaceError(
+      `Knowledge destination already exists: knowledge/${destinationPath}`,
+      "AIO-KNOWLEDGE-MOVE-CONFLICT",
+    );
+  }
+}
+
+async function missingDirectoryChain(
+  boundary: string,
+  target: string,
+): Promise<string[]> {
+  const relativeTarget = path.relative(boundary, target);
+  if (!relativeTarget || relativeTarget === ".") return [];
+  const missing: string[] = [];
+  let current = boundary;
+  let foundMissing = false;
+  for (const segment of relativeTarget.split(path.sep)) {
+    current = path.join(current, segment);
+    if (foundMissing || (await inspectPath(current)) === "missing") {
+      foundMissing = true;
+      missing.unshift(current);
+    }
+  }
+  return missing;
+}
+
+async function removeEmptyDirectories(directories: string[]): Promise<void> {
+  for (const directory of directories) {
+    try {
+      await rmdir(directory);
+    } catch (error) {
+      if (
+        !isNodeError(error) ||
+        !["ENOENT", "ENOTEMPTY", "EEXIST"].includes(error.code ?? "")
+      ) {
+        throw error;
+      }
+    }
+  }
+}
+
+async function restoreCreatedKnowledgePath(input: {
+  destination: string;
+  overviewPath: string;
+  createdDirectory: boolean;
+  createdOverview: boolean;
+  createdParents: string[];
+}): Promise<void> {
+  if (input.createdDirectory) {
+    await rm(input.destination, { recursive: true, force: true });
+  } else if (input.createdOverview) {
+    await rm(input.overviewPath, { force: true });
+  }
+  await removeEmptyDirectories(input.createdParents);
+}
+
+async function collectStaleKnowledgeKeys(
+  root: string,
+  entries: KnowledgeEntry[],
+): Promise<string[]> {
+  const stale: string[] = [];
+  for (const entry of entries) {
+    const status = await inspectKnowledgeOverview(root, entry, entries);
+    if (status.issue?.code === "AIO-KNOWLEDGE-STALE") stale.push(entry.key);
+  }
+  return stale.sort();
+}
+
+function discardKnowledgePreview(
+  plan: KnowledgeDiscardPlan,
+  trashTarget = `.aiongside/trash/knowledge/${plan.entry.key}-<timestamp>`,
+): DiscardKnowledgePreview {
+  return {
+    key: plan.entry.key,
+    path: plan.entry.path,
+    childKeys: plan.childKeys,
+    referencedBy: plan.referencedBy,
+    trashTarget,
+    staleKeys: plan.staleKeys,
+  };
+}
+
+function resolveKnowledgePlan<T>(action: () => T): T {
+  try {
+    return action();
+  } catch (error) {
+    if (error instanceof KnowledgeMutationError) {
+      throw new WorkspaceError(error.message, error.code);
+    }
+    throw error;
+  }
 }
 
 function validateDependencies(metadata: WorkMetadata[]): ValidationIssue[] {
@@ -2953,6 +3463,9 @@ async function withWorkspaceLock<T>(
   } catch (error) {
     if (error instanceof WorkspaceError) {
       throw error;
+    }
+    if (error instanceof KnowledgeMutationError) {
+      throw new WorkspaceError(error.message, error.code);
     }
     throw new WorkspaceError(
       `Workspace mutation failed: ${errorMessage(error)}`,

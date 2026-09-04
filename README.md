@@ -13,7 +13,7 @@ The first goal is simple local work management. The second goal is a validation 
 - TypeScript monorepo managed with Bun.
 - Project-local Agent Skills, managed instructions, and lifecycle Hooks installed and validated by the CLI.
 - Record-body freshness tracking for human-readable Overviews implemented.
-- Nested Knowledge lifecycle, freshness validation, exploration, sync, and Work completion gates implemented.
+- Nested Knowledge lifecycle, topic creation, movement, recoverable discard, freshness validation, exploration, sync, and Work completion gates implemented.
 - Local Web UI reserved for the distant future.
 - TUI excluded from product scope.
 
@@ -147,6 +147,35 @@ aiongside knowledge tree
 aiongside knowledge show incident-response
 ```
 
+Create a new topic, or register an existing unregistered directory with the same command:
+
+```sh
+aiongside knowledge new operations --display-name "Operations"
+aiongside knowledge new incident-response --parent operations
+aiongside knowledge new handbook --path company/handbook
+```
+
+A new empty path receives a minimal English Overview and starts fresh. Existing files are preserved byte-for-byte. An existing Overview is never rewritten; a missing Overview receives only a minimal heading. Adopted content remains stale until a person reviews it and runs `knowledge sync`.
+
+Moving a topic preserves its key, Work relationships, nested registered paths, and all user content. Preview first because Markdown links are reported but never rewritten:
+
+```sh
+aiongside knowledge move incident-response \
+  --path reliability/incident-response \
+  --no-parent \
+  --dry-run --json
+aiongside knowledge move incident-response \
+  --path reliability/incident-response \
+  --no-parent
+```
+
+Discard is limited to a leaf topic with no Work references. It removes the Registry row and moves the directory plus recovery metadata under `.aiongside/trash/knowledge/`; restoration remains manual:
+
+```sh
+aiongside knowledge discard incident-response --dry-run
+aiongside knowledge discard incident-response --confirm incident-response
+```
+
 Each Overview stores machine-owned freshness metadata under one namespace while preserving its Markdown body and other frontmatter:
 
 ```yaml
@@ -243,6 +272,9 @@ aiongside work needs add <id> <dependency-id>
 aiongside work needs remove <id> <dependency-id>
 aiongside work knowledge add <id> <key>
 aiongside work knowledge remove <id> <key>
+aiongside knowledge new <key> [--display-name <name>] [--path <path>] [--parent <key>] [--json]
+aiongside knowledge move <key> --path <path> [--parent <key> | --no-parent] [--dry-run] [--json]
+aiongside knowledge discard <key> [--dry-run | --confirm <key>] [--json]
 aiongside knowledge list [--json]
 aiongside knowledge tree [--json]
 aiongside knowledge show <key> [--json]

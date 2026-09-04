@@ -21,6 +21,10 @@ import {
   parseKnowledgeOverviewDocument,
   parseKnowledgeRegistry,
   parseMarkdownDocument,
+  planKnowledgeCreate,
+  planKnowledgeDiscard,
+  planKnowledgeMove,
+  renderKnowledgeRegistry,
   renderViews,
   replaceMarkdownMetadata,
   validateKnowledgeRegistryEntries,
@@ -359,6 +363,95 @@ User notes.
         }),
       ]),
     );
+  });
+
+  test("renders only the managed table and upgrades legacy registries", () => {
+    const current =
+      "# Registry\r\n\r\nBefore.\r\n\r\n| Key | Path | Parent | Display name |\r\n| --- | --- | --- | --- |\r\n| first | first | | First |\r\n\r\nAfter.\r\n";
+    const entries = [
+      ...parseKnowledgeRegistry(current).entries,
+      {
+        key: "second",
+        path: "first/second",
+        parent: "first",
+        displayName: "Second | topic",
+        line: 8,
+      },
+    ];
+    expect(renderKnowledgeRegistry(current, entries)).toBe(
+      "# Registry\r\n\r\nBefore.\r\n\r\n| Key | Path | Parent | Display name |\r\n| --- | --- | --- | --- |\r\n| first | first |  | First |\r\n| second | first/second | first | Second \\| topic |\r\n\r\nAfter.\r\n",
+    );
+
+    const legacy =
+      "Intro\n\n| Key | Display name |\n| --- | --- |\n| first | First |\n\nNotes\n";
+    expect(
+      renderKnowledgeRegistry(legacy, parseKnowledgeRegistry(legacy).entries),
+    ).toBe(
+      "Intro\n\n| Key | Path | Parent | Display name |\n| --- | --- | --- | --- |\n| first | first |  | First |\n\nNotes\n",
+    );
+  });
+
+  test("plans Knowledge create, nested move, and discard impacts", () => {
+    const root = planKnowledgeCreate([], { key: "operations" });
+    expect(root.entry).toEqual(
+      expect.objectContaining({
+        key: "operations",
+        path: "operations",
+        displayName: "operations",
+      }),
+    );
+    const child = planKnowledgeCreate(root.entries, {
+      key: "incidents",
+      parent: "operations",
+      displayName: "Incidents",
+    });
+    expect(child.entry.path).toBe("operations/incidents");
+    expect(child.staleKeys).toEqual(["operations"]);
+    const leaf = planKnowledgeCreate(child.entries, {
+      key: "sev-one",
+      path: "operations/incidents/sev-one",
+      parent: "incidents",
+    });
+    const moved = planKnowledgeMove(leaf.entries, {
+      key: "incidents",
+      path: "reliability/incidents",
+      parent: null,
+    });
+    expect(moved.movedKeys).toEqual(["incidents", "sev-one"]);
+    expect(moved.entries.find((entry) => entry.key === "sev-one")?.path).toBe(
+      "reliability/incidents/sev-one",
+    );
+    expect(moved.staleKeys).toEqual(["incidents", "operations"]);
+    expect(
+      planKnowledgeDiscard(moved.entries, "incidents", ["WORK-2"]),
+    ).toEqual(
+      expect.objectContaining({
+        childKeys: ["sev-one"],
+        referencedBy: ["WORK-2"],
+      }),
+    );
+  });
+
+  test("rejects mutation conflicts with stable error codes", () => {
+    const entries = planKnowledgeCreate([], { key: "operations" }).entries;
+    expect(() => planKnowledgeCreate(entries, { key: "operations" })).toThrow(
+      expect.objectContaining({ code: "AIO-KNOWLEDGE-CREATE-CONFLICT" }),
+    );
+    expect(() =>
+      planKnowledgeMove(entries, {
+        key: "operations",
+        path: "operations/inside",
+      }),
+    ).toThrow(expect.objectContaining({ code: "AIO-KNOWLEDGE-MOVE-CONFLICT" }));
+    expect(() => planKnowledgeDiscard(entries, "missing")).toThrow(
+      expect.objectContaining({ code: "AIO-KNOWLEDGE-NOT-FOUND" }),
+    );
+    expect(() =>
+      planKnowledgeCreate(entries, {
+        key: "empty-name",
+        displayName: "   ",
+      }),
+    ).toThrow(expect.objectContaining({ code: "AIO-KNOWLEDGE-DISPLAY-NAME" }));
   });
 });
 

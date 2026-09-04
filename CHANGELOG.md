@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-09-05
+
 ### Changed
 
 - Replaced the previous classification heading with the product-neutral `Knowledge registry`.
@@ -14,6 +16,10 @@
 - Added `knowledge list`, `tree`, `show`, and target-only `sync` with human and JSON output.
 - Added `AIO-KNOWLEDGE-STALE` validation, Stop Hook reporting, and linked Knowledge freshness gates for `done`.
 - Kept unrelated Work mutations available while Knowledge review is in progress.
+- Added `knowledge new` for new topics and byte-preserving registration of existing directories.
+- Added dry-run and atomic subtree movement through `knowledge move` while preserving keys and Work relationships.
+- Added leaf-only, reference-safe `knowledge discard` with content and recovery metadata stored under `.aiongside/trash/knowledge/`.
+- Added managed Agent procedures for Knowledge creation, move approval, discard approval, and direct-edit avoidance.
 
 ### Breaking changes
 
