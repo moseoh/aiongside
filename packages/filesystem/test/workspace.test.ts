@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   mkdir,
   mkdtemp,
@@ -5,6 +6,7 @@ import {
   readFile,
   rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -22,6 +24,7 @@ import {
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   addWorkDependency,
+  addWorkKnowledge,
   cancelWork,
   confirmWork,
   createWork,
@@ -37,6 +40,7 @@ import {
   previewMoveWork,
   rebuildViews,
   removeWorkDependency,
+  removeWorkKnowledge,
   syncAgentSkills,
   syncWorkOverview,
   validateWorkspace,
@@ -87,6 +91,39 @@ async function setNeeds(
   await writeFile(recordPath, source.replace("needs: []", replacement));
 }
 
+async function registerKnowledge(
+  root: string,
+  entries: Array<{
+    key: string;
+    path: string;
+    parent?: string;
+    displayName: string;
+  }>,
+): Promise<void> {
+  for (const entry of entries) {
+    const directory = path.join(root, "knowledge", ...entry.path.split("/"));
+    await mkdir(directory, { recursive: true });
+    await writeFile(
+      path.join(directory, "overview.md"),
+      `# ${entry.displayName}\n`,
+    );
+  }
+  await writeFile(
+    path.join(root, "knowledge", "registry.md"),
+    `# Knowledge registry
+
+| Key | Path | Parent | Display name |
+| --- | --- | --- | --- |
+${entries
+  .map(
+    (entry) =>
+      `| ${entry.key} | ${entry.path} | ${entry.parent ?? ""} | ${entry.displayName} |`,
+  )
+  .join("\n")}
+`,
+  );
+}
+
 async function writeWorkFixture(root: string, id: string): Promise<void> {
   const metadata = workMetadataSchema.parse({
     schema: 1,
@@ -118,6 +155,51 @@ async function writeWorkFixture(root: string, id: string): Promise<void> {
       mkdir(path.join(directory, name)),
     ),
   ]);
+}
+
+async function legacyCompletionDigest(
+  root: string,
+  id: string,
+  metadata: ReturnType<typeof workMetadataSchema.parse>,
+  recordBody: string,
+): Promise<string> {
+  const hash = createHash("sha256");
+  hash.update("record-metadata\0");
+  hash.update(
+    JSON.stringify({
+      schema: metadata.schema,
+      id: metadata.id,
+      title: metadata.title,
+      type: metadata.type,
+      created: metadata.created,
+      needs: metadata.needs,
+      checks: metadata.checks,
+    }),
+  );
+  hash.update("\0record-body\0");
+  hash.update(`${recordBody.replaceAll("\r\n", "\n").trimEnd()}\n`);
+
+  const workPath = path.join(root, "work", id);
+  const files: string[] = [];
+  const visit = async (directory: string): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const target = path.join(directory, entry.name);
+      if (entry.isDirectory()) await visit(target);
+      else if (entry.isFile()) files.push(path.relative(root, target));
+    }
+  };
+  await visit(workPath);
+  for (const file of files.sort()) {
+    if (file === `work/${id}/record.md`) continue;
+    hash.update(`\0${file}\0`);
+    if (/\/(references|deliverables|evidence)\//.test(file)) {
+      hash.update(await readFile(path.join(root, file)));
+    } else {
+      const source = await readFile(path.join(root, file), "utf8");
+      hash.update(`${source.replaceAll("\r\n", "\n").trimEnd()}\n`);
+    }
+  }
+  return hash.digest("hex");
 }
 
 const allChecks = [
@@ -215,7 +297,7 @@ describe("workspace lifecycle", () => {
       "utf8",
     );
 
-    expect(config).toContain("agentSkillVersion: 5");
+    expect(config).toContain("agentSkillVersion: 6");
     for (const target of [
       path.join(root, ".agents", "skills", "aiongside", "SKILL.md"),
       path.join(root, ".claude", "skills", "aiongside", "SKILL.md"),
@@ -242,7 +324,9 @@ describe("workspace lifecycle", () => {
 
     expect(
       await readFile(path.join(knowledgePath, "registry.md"), "utf8"),
-    ).toBe("# Knowledge registry\n\n| Key | Display name |\n| --- | --- |\n");
+    ).toBe(
+      "# Knowledge registry\n\n| Key | Path | Parent | Display name |\n| --- | --- | --- | --- |\n",
+    );
     expect(await readdir(knowledgePath)).toEqual(["registry.md"]);
   });
 
@@ -291,7 +375,7 @@ describe("workspace lifecycle", () => {
     await mkdir(path.dirname(olderTarget), { recursive: true });
     await writeFile(
       olderTarget,
-      source.replace('aiongside-version: "5"', 'aiongside-version: "4"'),
+      source.replace('aiongside-version: "6"', 'aiongside-version: "5"'),
     );
     await initializeWorkspace(olderRoot);
     expect(await readFile(olderTarget, "utf8")).toBe(source);
@@ -332,8 +416,8 @@ describe("workspace lifecycle", () => {
       "SKILL.md",
     );
     const newer = source.replace(
-      'aiongside-version: "5"',
       'aiongside-version: "6"',
+      'aiongside-version: "7"',
     );
     await mkdir(path.dirname(newerTarget), { recursive: true });
     await writeFile(newerTarget, newer);
@@ -372,7 +456,7 @@ describe("workspace lifecycle", () => {
     const root = await workspace();
     const configPath = path.join(root, ".aiongside", "config.yaml");
     const legacyConfig = (await readFile(configPath, "utf8")).replace(
-      "agentSkillVersion: 5\n",
+      "agentSkillVersion: 6\n",
       "",
     );
     await writeFile(configPath, legacyConfig);
@@ -424,7 +508,7 @@ describe("workspace lifecycle", () => {
     );
     await writeFile(
       skillPath,
-      source.replace('aiongside-version: "5"', 'aiongside-version: "4"'),
+      source.replace('aiongside-version: "6"', 'aiongside-version: "5"'),
     );
     expect((await syncAgentSkills(root)).changes).toContainEqual({
       path: ".agents/skills/aiongside/SKILL.md",
@@ -436,8 +520,8 @@ describe("workspace lifecycle", () => {
     await writeFile(
       configPath,
       (await readFile(configPath, "utf8")).replace(
-        "agentSkillVersion: 5",
         "agentSkillVersion: 6",
+        "agentSkillVersion: 7",
       ),
     );
     const before = await readFile(skillPath, "utf8");
@@ -451,7 +535,7 @@ describe("workspace lifecycle", () => {
     const root = await workspace();
     const configPath = path.join(root, ".aiongside", "config.yaml");
     const legacyConfig = (await readFile(configPath, "utf8")).replace(
-      "agentSkillVersion: 5\n",
+      "agentSkillVersion: 6\n",
       "",
     );
     await writeFile(configPath, legacyConfig);
@@ -585,7 +669,7 @@ describe("workspace lifecycle", () => {
 
     await writeFile(
       agentsPath,
-      source.replace('aiongside-version: "5"', 'aiongside-version: "4"'),
+      source.replace('aiongside-version: "6"', 'aiongside-version: "5"'),
     );
     expect(await validateWorkspace(root)).toContainEqual(
       expect.objectContaining({ code: "AIO-SKILL-OUTDATED" }),
@@ -1053,6 +1137,124 @@ describe("workspace lifecycle", () => {
     }
   });
 
+  test("adds, removes, and safely repeats Work Knowledge relationships", async () => {
+    const root = await workspace();
+    const work = await createWork(root, "Knowledge-linked work");
+    await registerKnowledge(root, [
+      {
+        key: "incident-response",
+        path: "operations/incident-response",
+        displayName: "Incident response",
+      },
+    ]);
+    await confirmWork(root, work.id, ["knowledge"]);
+
+    const added = await addWorkKnowledge(root, work.id, "Incident-Response");
+    expect(added).toEqual(
+      expect.objectContaining({
+        id: work.id,
+        key: "incident-response",
+        path: "operations/incident-response",
+        changed: true,
+        knowledge: ["incident-response"],
+      }),
+    );
+    expect(added.metadata.checks.knowledge).toBe(false);
+
+    const recordPath = path.join(root, "work", work.id, "record.md");
+    const views = [
+      path.join(root, "views", "open.md"),
+      path.join(root, "views", "closed.md"),
+    ];
+    const beforeDuplicate = await Promise.all(
+      [recordPath, ...views].map((target) => readFile(target)),
+    );
+    expect(
+      (await addWorkKnowledge(root, work.id, "incident-response")).changed,
+    ).toBe(false);
+    expect(
+      await Promise.all(
+        [recordPath, ...views].map((target) => readFile(target)),
+      ),
+    ).toEqual(beforeDuplicate);
+
+    expect(
+      (await removeWorkKnowledge(root, work.id, "incident-response")).changed,
+    ).toBe(true);
+    const beforeAbsent = await readFile(recordPath);
+    expect(
+      (await removeWorkKnowledge(root, work.id, "incident-response")).changed,
+    ).toBe(false);
+    expect(await readFile(recordPath)).toEqual(beforeAbsent);
+  });
+
+  test("validates Knowledge mutation targets and seals done Work", async () => {
+    const root = await workspace();
+    const work = await createWork(root, "Knowledge mutation gates");
+    await registerKnowledge(root, [
+      {
+        key: "operations",
+        path: "operations",
+        displayName: "Operations",
+      },
+      {
+        key: "incident-response",
+        path: "operations/incident-response",
+        parent: "operations",
+        displayName: "Incident response",
+      },
+    ]);
+
+    await expect(
+      addWorkKnowledge(root, work.id, "missing"),
+    ).rejects.toMatchObject({ code: "AIO-WORK-KNOWLEDGE-MISSING" });
+    await addWorkKnowledge(root, work.id, "incident-response");
+    await confirmWork(root, work.id, [...allChecks]);
+    await moveWork(root, work.id, "done");
+    await expect(
+      addWorkKnowledge(root, work.id, "operations"),
+    ).rejects.toMatchObject({ code: "AIO-DONE-SEALED" });
+    await expect(
+      removeWorkKnowledge(root, work.id, "incident-response"),
+    ).rejects.toMatchObject({ code: "AIO-DONE-SEALED" });
+  });
+
+  test("keeps Work Knowledge relationships when a registered path moves", async () => {
+    const root = await workspace();
+    const work = await createWork(root, "Move Knowledge path");
+    await registerKnowledge(root, [
+      {
+        key: "incident-response",
+        path: "operations/incident-response",
+        displayName: "Incident response",
+      },
+    ]);
+    await addWorkKnowledge(root, work.id, "incident-response");
+    const source = path.join(
+      root,
+      "knowledge",
+      "operations",
+      "incident-response",
+    );
+    const target = path.join(root, "knowledge", "reliability", "incidents");
+    await mkdir(path.dirname(target), { recursive: true });
+    await rename(source, target);
+    await writeFile(
+      path.join(root, "knowledge", "registry.md"),
+      `# Knowledge registry
+
+| Key | Path | Parent | Display name |
+| --- | --- | --- | --- |
+| incident-response | reliability/incidents | | Incident response |
+`,
+    );
+
+    expect(await validateWorkspace(root)).toEqual([]);
+    expect((await listWorks(root))[0]?.metadata.knowledge).toEqual([
+      "incident-response",
+    ]);
+  });
+
   test("requires completed dependencies only before done", async () => {
     const root = await workspace();
     const dependency = await createWork(root, "Required work");
@@ -1113,6 +1315,82 @@ describe("workspace lifecycle", () => {
       "done",
     );
     expect(await validateWorkspace(root)).toEqual([]);
+  });
+
+  test("previews no-impact and linked Knowledge reviews before done", async () => {
+    const root = await workspace();
+    const unlinked = await createWork(root, "No lasting Knowledge");
+    const noImpact = await previewMoveWork(root, unlinked.id, "done");
+    expect(noImpact.knowledgeReview).toEqual({
+      confirmed: false,
+      targets: [],
+    });
+    expect(
+      noImpact.requiredInputs.find((input) => input.key === "checks.knowledge")
+        ?.question,
+    ).toContain("no lasting Knowledge impact");
+
+    const linked = await createWork(root, "Update incident guidance");
+    await registerKnowledge(root, [
+      {
+        key: "operations",
+        path: "operations",
+        displayName: "Operations",
+      },
+      {
+        key: "incident-response",
+        path: "operations/incident-response",
+        parent: "operations",
+        displayName: "Incident response",
+      },
+    ]);
+    await addWorkKnowledge(root, linked.id, "incident-response");
+    const review = await previewMoveWork(root, linked.id, "done");
+    expect(review.knowledgeReview).toEqual({
+      confirmed: false,
+      targets: [
+        {
+          key: "incident-response",
+          path: "operations/incident-response",
+          overview: "knowledge/operations/incident-response/overview.md",
+        },
+      ],
+    });
+    expect(
+      review.knowledgeReview?.targets.map((target) => target.key),
+    ).not.toContain("operations");
+  });
+
+  test("keeps Knowledge candidates and requires review again after reopening", async () => {
+    const root = await workspace();
+    const work = await createWork(root, "Repeat Knowledge review");
+    await registerKnowledge(root, [
+      {
+        key: "operations",
+        path: "operations",
+        displayName: "Operations",
+      },
+    ]);
+    await addWorkKnowledge(root, work.id, "operations");
+    await confirmWork(root, work.id, [...allChecks]);
+    await moveWork(root, work.id, "done");
+
+    const same = await previewMoveWork(root, work.id, "done");
+    expect(same.knowledgeReview).toBeUndefined();
+    const reopened = await moveWork(root, work.id, "active", {
+      reopenReason: "Operational guidance changed",
+    });
+    expect(reopened.metadata.knowledge).toEqual(["operations"]);
+    expect(reopened.metadata.checks.knowledge).toBe(false);
+    const repeated = await previewMoveWork(root, work.id, "done");
+    expect(repeated.knowledgeReview?.targets).toEqual([
+      {
+        key: "operations",
+        path: "operations",
+        overview: "knowledge/operations/overview.md",
+      },
+    ]);
+    expect(repeated.canMove).toBe(false);
   });
 
   test("previews required waiting inputs without writing", async () => {
@@ -1427,6 +1705,34 @@ describe("workspace lifecycle", () => {
     expect(await validateWorkspace(root)).toEqual([]);
   });
 
+  test("preserves completion seals created before Knowledge relationships", async () => {
+    const root = await workspace();
+    const work = await createWork(root, "Pre-Knowledge completion seal");
+    await confirmWork(root, work.id, [...allChecks]);
+    await moveWork(root, work.id, "done");
+    const recordPath = path.join(root, "work", work.id, "record.md");
+    const document = parseMarkdownDocument(await readFile(recordPath, "utf8"));
+    const metadata = workMetadataSchema.parse(document.metadata);
+    const digest = await legacyCompletionDigest(
+      root,
+      work.id,
+      metadata,
+      document.body,
+    );
+    const legacyMetadata = document.metadata as Record<string, unknown>;
+    delete legacyMetadata.knowledge;
+    legacyMetadata.completionSeal = {
+      ...metadata.completionSeal,
+      digest,
+    };
+    await writeFile(
+      recordPath,
+      formatMarkdownDocument(legacyMetadata, document.body),
+    );
+
+    expect(await validateWorkspace(root)).toEqual([]);
+  });
+
   test("warns about direct and indirect completed dependents when reopening done work", async () => {
     const root = await workspace();
     const first = await createWork(root, "Root dependency");
@@ -1615,7 +1921,7 @@ describe("workspace lifecycle", () => {
     );
   });
 
-  test("leaves arbitrary supporting content and Registry text untouched", async () => {
+  test("leaves arbitrary supporting content and Registry prose untouched", async () => {
     const root = await workspace();
     const work = await createWork(root, "Opaque supporting content");
     const binaryPath = path.join(
@@ -1629,7 +1935,10 @@ describe("workspace lifecycle", () => {
     const registryPath = path.join(root, "knowledge", "registry.md");
     await mkdir(path.dirname(binaryPath), { recursive: true });
     await writeFile(binaryPath, Buffer.from([0x00, 0x80, 0xff]));
-    await writeFile(registryPath, "Any user-owned format\n");
+    await writeFile(
+      registryPath,
+      "# Custom registry\n\nUser prose.\n\n| Key | Path | Parent | Display name |\n| --- | --- | --- | --- |\n\nMore user prose.\n",
+    );
     const targets = [
       path.join(root, "work", work.id, "record.md"),
       path.join(root, "views", "open.md"),
@@ -1643,6 +1952,164 @@ describe("workspace lifecycle", () => {
 
     const after = await Promise.all(targets.map((target) => readFile(target)));
     expect(after).toEqual(before);
+  });
+
+  test("validates nested Knowledge entries and ignores unregistered content", async () => {
+    const root = await workspace();
+    const registryPath = path.join(root, "knowledge", "registry.md");
+    const operationsPath = path.join(root, "knowledge", "operations");
+    const incidentPath = path.join(operationsPath, "incident-response");
+    await mkdir(path.join(incidentPath, "troubleshooting"), {
+      recursive: true,
+    });
+    await writeFile(path.join(operationsPath, "overview.md"), "# Operations\n");
+    await writeFile(path.join(incidentPath, "overview.md"), "# Incidents\n");
+    await writeFile(
+      path.join(incidentPath, "troubleshooting", "database.md"),
+      "# Database\n",
+    );
+    await writeFile(
+      registryPath,
+      `# Knowledge registry
+
+| Key | Path | Parent | Display name |
+| --- | --- | --- | --- |
+| operations | operations | | Operations |
+| incident-response | operations/incident-response | operations | Incident response |
+`,
+    );
+
+    expect(await validateWorkspace(root)).toEqual([]);
+  });
+
+  test("reports invalid Knowledge Registry relationships and entrypoints", async () => {
+    const root = await workspace();
+    const knowledgePath = path.join(root, "knowledge");
+    await mkdir(path.join(knowledgePath, "operations"));
+    await writeFile(
+      path.join(knowledgePath, "operations", "overview.md"),
+      "# Operations\n",
+    );
+    await writeFile(
+      path.join(knowledgePath, "registry.md"),
+      `# Knowledge registry
+
+| Key | Path | Parent | Display name |
+| --- | --- | --- | --- |
+| operations | operations | | Operations |
+| operations | operations | operations | Duplicate |
+| missing-parent | missing-parent | unknown | Missing parent |
+| invalid-path | ../outside | | Invalid path |
+`,
+    );
+
+    const codes = new Set(
+      (await validateWorkspace(root)).map((issue) => issue.code),
+    );
+    expect(codes).toEqual(
+      new Set([
+        "AIO-KNOWLEDGE-KEY",
+        "AIO-KNOWLEDGE-PATH",
+        "AIO-KNOWLEDGE-PARENT",
+        "AIO-KNOWLEDGE-ENTRYPOINT",
+      ]),
+    );
+  });
+
+  test("rejects symbolic links in registered Knowledge paths", async () => {
+    const root = await workspace();
+    const knowledgePath = path.join(root, "knowledge");
+    const target = path.join(root, "external-knowledge");
+    await mkdir(target);
+    await writeFile(path.join(target, "overview.md"), "# External\n");
+    await symlink(target, path.join(knowledgePath, "linked"));
+    await writeFile(
+      path.join(knowledgePath, "registry.md"),
+      `# Knowledge registry
+
+| Key | Path | Parent | Display name |
+| --- | --- | --- | --- |
+| linked | linked | | Linked |
+`,
+    );
+
+    expect(await validateWorkspace(root)).toContainEqual(
+      expect.objectContaining({ code: "AIO-KNOWLEDGE-PATH" }),
+    );
+  });
+
+  test("validates Work Knowledge references without requiring parent keys", async () => {
+    const root = await workspace();
+    const work = await createWork(root, "Knowledge references");
+    const knowledgePath = path.join(root, "knowledge");
+    await mkdir(path.join(knowledgePath, "operations", "incident-response"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(knowledgePath, "operations", "overview.md"),
+      "# Operations\n",
+    );
+    await writeFile(
+      path.join(
+        knowledgePath,
+        "operations",
+        "incident-response",
+        "overview.md",
+      ),
+      "# Incidents\n",
+    );
+    await writeFile(
+      path.join(knowledgePath, "registry.md"),
+      `# Knowledge registry
+
+| Key | Path | Parent | Display name |
+| --- | --- | --- | --- |
+| operations | operations | | Operations |
+| incident-response | operations/incident-response | operations | Incident response |
+`,
+    );
+    const recordPath = path.join(root, "work", work.id, "record.md");
+    const source = await readFile(recordPath, "utf8");
+    await writeFile(
+      recordPath,
+      source.replace("knowledge: []", "knowledge:\n  - incident-response"),
+    );
+
+    expect(await validateWorkspace(root)).toEqual([]);
+
+    await writeFile(
+      recordPath,
+      source.replace("knowledge: []", "knowledge:\n  - missing\n  - missing"),
+    );
+    const codes = new Set(
+      (await validateWorkspace(root)).map((issue) => issue.code),
+    );
+    expect(codes).toEqual(
+      new Set(["AIO-WORK-KNOWLEDGE-MISSING", "AIO-WORK-KNOWLEDGE-DUPLICATE"]),
+    );
+  });
+
+  test("accepts legacy Registry rows and Records without Knowledge metadata", async () => {
+    const root = await workspace();
+    const work = await createWork(root, "Legacy Knowledge");
+    const knowledgePath = path.join(root, "knowledge", "operations");
+    await mkdir(knowledgePath);
+    await writeFile(path.join(knowledgePath, "overview.md"), "# Operations\n");
+    await writeFile(
+      path.join(root, "knowledge", "registry.md"),
+      "# Knowledge registry\n\n| Key | Display name |\n| --- | --- |\n| operations | Operations |\n",
+    );
+    const recordPath = path.join(root, "work", work.id, "record.md");
+    await writeFile(
+      recordPath,
+      (await readFile(recordPath, "utf8")).replace("knowledge: []\n", ""),
+    );
+
+    const before = await readFile(path.join(root, "knowledge", "registry.md"));
+    expect(await validateWorkspace(root)).toEqual([]);
+    expect(await readFile(path.join(root, "knowledge", "registry.md"))).toEqual(
+      before,
+    );
   });
 
   test("blocks mutations when supporting structure is invalid", async () => {

@@ -28,6 +28,29 @@ async function tempRoot(): Promise<string> {
   return root;
 }
 
+async function registerKnowledge(root: string): Promise<void> {
+  const knowledgePath = path.join(
+    root,
+    "knowledge",
+    "operations",
+    "incident-response",
+  );
+  await mkdir(knowledgePath, { recursive: true });
+  await writeFile(
+    path.join(knowledgePath, "overview.md"),
+    "# Incident response\n",
+  );
+  await writeFile(
+    path.join(root, "knowledge", "registry.md"),
+    `# Knowledge registry
+
+| Key | Path | Parent | Display name |
+| --- | --- | --- | --- |
+| incident-response | operations/incident-response | | Incident response |
+`,
+  );
+}
+
 async function cli(args: string[], input?: string) {
   if (input === undefined) {
     return execFileAsync(process.execPath, [bin, ...args], {
@@ -173,6 +196,17 @@ describe("CLI", () => {
     expect(removeHelp.stdout).toContain("<id> <dependency-id>");
   });
 
+  test("documents nested Work Knowledge commands", async () => {
+    const help = await cli(["work", "knowledge", "--help"]);
+    const addHelp = await cli(["work", "knowledge", "add", "--help"]);
+    const removeHelp = await cli(["work", "knowledge", "remove", "--help"]);
+
+    expect(help.stdout).toContain("add");
+    expect(help.stdout).toContain("remove");
+    expect(addHelp.stdout).toContain("<id> <key>");
+    expect(removeHelp.stdout).toContain("<id> <key>");
+  });
+
   test("documents and runs Agent Skill sync", async () => {
     const root = await tempRoot();
     await cli(["init", root]);
@@ -183,7 +217,7 @@ describe("CLI", () => {
     await writeFile(
       configPath,
       (await readFile(configPath, "utf8")).replace(
-        "agentSkillVersion: 5\n",
+        "agentSkillVersion: 6\n",
         "",
       ),
     );
@@ -193,7 +227,7 @@ describe("CLI", () => {
     await mkdir(nested, { recursive: true });
 
     const synced = await cli(["--root", nested, "skill", "sync"]);
-    expect(synced.stdout).toContain("Agent integration synced (version 5)");
+    expect(synced.stdout).toContain("Agent integration synced (version 6)");
     expect(synced.stdout).toContain(
       "+ Created  .agents/skills/aiongside/SKILL.md",
     );
@@ -206,7 +240,7 @@ describe("CLI", () => {
 
     const noOp = await cli(["--root", root, "skill", "sync"]);
     expect(noOp.stdout).toContain(
-      "✓ Agent integration is current (version 5)\n",
+      "✓ Agent integration is current (version 6)\n",
     );
     expect(noOp.stdout).toContain("Approve project Hooks");
   });
@@ -394,6 +428,76 @@ describe("CLI", () => {
     );
   });
 
+  test("adds, removes, and safely repeats Work Knowledge commands", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    await cli(["--root", root, "work", "new", "Knowledge-linked work"]);
+    await registerKnowledge(root);
+
+    const added = await cli([
+      "--root",
+      root,
+      "work",
+      "knowledge",
+      "add",
+      "work-1",
+      "Incident-Response",
+    ]);
+    expect(added.stdout).toBe(
+      "✓ Added Knowledge relationship — WORK-1 → incident-response (operations/incident-response)\n",
+    );
+    const duplicate = await cli([
+      "--root",
+      root,
+      "work",
+      "knowledge",
+      "add",
+      "WORK-1",
+      "incident-response",
+    ]);
+    expect(duplicate.stdout).toContain("already exists");
+
+    const removed = await cli([
+      "--root",
+      root,
+      "work",
+      "knowledge",
+      "remove",
+      "WORK-1",
+      "incident-response",
+    ]);
+    expect(removed.stdout).toBe(
+      "✓ Removed Knowledge relationship — WORK-1 ⇥ incident-response\n",
+    );
+    const absent = await cli([
+      "--root",
+      root,
+      "work",
+      "knowledge",
+      "remove",
+      "WORK-1",
+      "incident-response",
+    ]);
+    expect(absent.stdout).toContain("already absent");
+    expect((await cli(["--root", root, "check"])).stdout).toBe(
+      "✓ Check passed\n",
+    );
+  });
+
+  test("reports Work Knowledge command failures with exit code 2", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    await cli(["--root", root, "work", "new", "Knowledge-linked work"]);
+    await registerKnowledge(root);
+
+    await expect(
+      cli(["--root", root, "work", "knowledge", "add", "WORK-1", "missing"]),
+    ).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining("AIO-WORK-KNOWLEDGE-MISSING"),
+    });
+  });
+
   test("reports dependency validation failures with exit code 2", async () => {
     const root = await tempRoot();
     await cli(["init", root]);
@@ -510,6 +614,62 @@ describe("CLI", () => {
     expect(preview.stdout).toBe(`${JSON.stringify(result, null, 2)}\n`);
     expect(preview.stderr).toBe("");
     expect(await readFile(recordPath, "utf8")).toBe(before);
+  });
+
+  test("prints no-impact and linked Knowledge review details for done dry-runs", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    await cli(["--root", root, "work", "new", "No Knowledge update"]);
+
+    const noImpact = await cli([
+      "--root",
+      root,
+      "work",
+      "move",
+      "WORK-1",
+      "done",
+      "--dry-run",
+    ]);
+    expect(noImpact.stdout).toContain("Knowledge");
+    expect(noImpact.stdout).toContain("no lasting Knowledge impact");
+
+    await cli(["--root", root, "work", "new", "Update incident guidance"]);
+    await registerKnowledge(root);
+    await cli([
+      "--root",
+      root,
+      "work",
+      "knowledge",
+      "add",
+      "WORK-2",
+      "incident-response",
+    ]);
+    const linked = await cli([
+      "--root",
+      root,
+      "work",
+      "move",
+      "WORK-2",
+      "done",
+      "--dry-run",
+      "--json",
+    ]);
+    const result = JSON.parse(linked.stdout) as {
+      knowledgeReview: {
+        confirmed: boolean;
+        targets: Array<{ key: string; path: string; overview: string }>;
+      };
+    };
+    expect(result.knowledgeReview).toEqual({
+      confirmed: false,
+      targets: [
+        {
+          key: "incident-response",
+          path: "operations/incident-response",
+          overview: "knowledge/operations/incident-response/overview.md",
+        },
+      ],
+    });
   });
 
   test("rejects missing transition input and records explicit values", async () => {

@@ -17,9 +17,11 @@ import {
   overviewMetadataSchema,
   parseAgentHookEvent,
   parseAgentSkill,
+  parseKnowledgeRegistry,
   parseMarkdownDocument,
   renderViews,
   replaceMarkdownMetadata,
+  validateKnowledgeRegistryEntries,
   WORK_STATUSES,
   workMetadataSchema,
   workspaceConfigSchema,
@@ -78,6 +80,20 @@ describe("Markdown document", () => {
     expect(
       workMetadataSchema.parse(parseMarkdownDocument(source).metadata),
     ).toEqual(enriched);
+  });
+
+  test("defaults missing Knowledge relationships and validates keys", () => {
+    expect(metadata.knowledge).toEqual([]);
+    expect(
+      workMetadataSchema.parse({
+        ...metadata,
+        knowledge: ["incident-response"],
+      }).knowledge,
+    ).toEqual(["incident-response"]);
+    expect(
+      workMetadataSchema.safeParse({ ...metadata, knowledge: ["Operations"] })
+        .success,
+    ).toBe(false);
   });
 
   test("keeps dynamic work state out of the default Overview", () => {
@@ -178,6 +194,112 @@ describe("Markdown document", () => {
   });
 });
 
+describe("Knowledge Registry", () => {
+  test("parses current and legacy tables while preserving user content", () => {
+    const current = parseKnowledgeRegistry(`# Knowledge registry
+
+User introduction.
+
+| Key | Path | Parent | Display name |
+| --- | --- | --- | --- |
+| operations | operations | | Operations |
+| incident-response | operations/incident-response | operations | Incident \\| response |
+
+User notes.
+`);
+    const legacy = parseKnowledgeRegistry(`# Knowledge registry
+
+| Key | Display name |
+| --- | --- |
+| operations | Operations |
+`);
+
+    expect(current).toEqual({
+      format: "current",
+      entries: [
+        {
+          key: "operations",
+          path: "operations",
+          displayName: "Operations",
+          line: 7,
+        },
+        {
+          key: "incident-response",
+          path: "operations/incident-response",
+          parent: "operations",
+          displayName: "Incident | response",
+          line: 8,
+        },
+      ],
+    });
+    expect(legacy.entries[0]).toEqual({
+      key: "operations",
+      path: "operations",
+      displayName: "Operations",
+      line: 5,
+    });
+  });
+
+  test("rejects missing, duplicate, and malformed managed tables", () => {
+    expect(() => parseKnowledgeRegistry("# Knowledge registry\n")).toThrow(
+      "Missing Knowledge Registry table",
+    );
+    expect(() =>
+      parseKnowledgeRegistry(`| Key | Display name |
+| --- | --- |
+
+| Key | Display name |
+| --- | --- |
+`),
+    ).toThrow("exactly one managed table");
+    expect(() =>
+      parseKnowledgeRegistry(`| Key | Path | Parent | Display name |
+| --- | --- |
+`),
+    ).toThrow("Invalid Knowledge Registry separator");
+  });
+
+  test("validates keys, paths, parents, duplicates, and cycles", () => {
+    const entries =
+      parseKnowledgeRegistry(`| Key | Path | Parent | Display name |
+| --- | --- | --- | --- |
+| operations | operations | | Operations |
+| incident-response | operations/incident-response | operations | Incidents |
+`).entries;
+    expect(validateKnowledgeRegistryEntries(entries)).toEqual([]);
+
+    const invalid =
+      parseKnowledgeRegistry(`| Key | Path | Parent | Display name |
+| --- | --- | --- | --- |
+| Invalid | ../outside | missing | Invalid |
+| duplicate | same | duplicate | Duplicate |
+| duplicate | same | duplicate | |
+`).entries;
+    expect(validateKnowledgeRegistryEntries(invalid)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "AIO-KNOWLEDGE-KEY" }),
+        expect.objectContaining({ code: "AIO-KNOWLEDGE-PATH" }),
+        expect.objectContaining({ code: "AIO-KNOWLEDGE-PARENT" }),
+        expect.objectContaining({ code: "AIO-KNOWLEDGE-DISPLAY-NAME" }),
+      ]),
+    );
+
+    const cycle = parseKnowledgeRegistry(`| Key | Path | Parent | Display name |
+| --- | --- | --- | --- |
+| first | first/second | second | First |
+| second | first | first | Second |
+`).entries;
+    expect(validateKnowledgeRegistryEntries(cycle)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "AIO-KNOWLEDGE-PARENT",
+          message: expect.stringContaining("cycle"),
+        }),
+      ]),
+    );
+  });
+});
+
 describe("workspace configuration", () => {
   test("keeps the Agent Skill version optional for schema 1 workspaces", () => {
     const legacy = { schema: 1, name: "Legacy", idPrefix: "AIO" };
@@ -213,6 +335,7 @@ describe("Agent Skill", () => {
       }),
     );
     expect(source).toContain("aiongside work move");
+    expect(source).toContain("aiongside work knowledge add");
     expect(source).toContain("aiongside work sync");
     expect(source).toContain("aiongside check");
   });
@@ -243,6 +366,8 @@ describe("Agent integration", () => {
 
     expect(instructions).toContain("AIongside managed instructions");
     expect(instructions).toContain("aiongside work move");
+    expect(instructions).toContain("Knowledge relationships");
+    expect(instructions).toContain("knowledgeReview");
     expect(instructions).toContain("aiongside work sync");
     expect(instructions).toContain("aiongside check");
     expect(rules).toContain("workspace-specific instructions");

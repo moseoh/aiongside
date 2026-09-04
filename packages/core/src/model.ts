@@ -41,6 +41,9 @@ const isoDate = z
 
 const isoTimestamp = z.string().datetime({ offset: true });
 const workId = z.string().regex(/^[A-Z][A-Z0-9]{1,7}-[1-9]\d*$/);
+export const knowledgeKeySchema = z
+  .string()
+  .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 const sha256Digest = z.string().regex(/^[a-f0-9]{64}$/);
 
 export const workspaceConfigSchema = z.object({
@@ -90,6 +93,7 @@ export const workMetadataSchema = z.object({
   created: isoDate,
   updated: isoDate,
   needs: z.array(workId).default([]),
+  knowledge: z.array(knowledgeKeySchema).default([]),
   checks: workChecksSchema,
   transitions: z.array(workTransitionSchema).default([]),
   completionSeal: completionSealSchema.nullable().default(null),
@@ -110,6 +114,7 @@ export type WorkType = WorkMetadata["type"];
 export type WorkCheck = (typeof WORK_CHECKS)[number];
 export type WorkTransition = z.infer<typeof workTransitionSchema>;
 export type CompletionSeal = z.infer<typeof completionSealSchema>;
+export type KnowledgeKey = z.infer<typeof knowledgeKeySchema>;
 
 export interface ValidationIssue {
   code: string;

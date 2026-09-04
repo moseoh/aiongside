@@ -3,7 +3,7 @@ name: aiongside
 description: Manage local AIongside work records and generated views. Use when a workspace contains .aiongside/config.yaml or the user asks to initialize or operate an AIongside workspace.
 license: MIT
 metadata:
-  aiongside-version: "5"
+  aiongside-version: "6"
 ---
 
 # AIongside
@@ -28,16 +28,18 @@ Do not check for updates automatically. Run `aiongside update` only when the use
 - Apply move: `aiongside work move <ID> <status> <required-options>`
 - Add dependency: `aiongside work needs add <ID> <dependency-ID>`
 - Remove dependency: `aiongside work needs remove <ID> <dependency-ID>`
+- Add Knowledge relationship: `aiongside work knowledge add <ID> <key>`
+- Remove Knowledge relationship: `aiongside work knowledge remove <ID> <key>`
 - Cancel alias: `aiongside work cancel <ID> --cancellation-reason "<reason>"`
 - Preview discard: `aiongside work discard <ID> --dry-run`
 - Rebuild generated views: `aiongside view rebuild`
 - Validate: `aiongside check`
 
-Use CLI commands for creation, status changes, confirmations, dependencies, and discard. Do not edit `needs` in record frontmatter directly. Edit other record metadata only when no command exists. Do not hand-create IDs or rewrite generated view files.
+Use CLI commands for creation, status changes, confirmations, dependencies, Knowledge relationships, and discard. Do not edit `needs` or `knowledge` in record frontmatter directly. Edit other record metadata only when no command exists. Do not hand-create IDs or rewrite generated view files.
 
 Before every status change, run the JSON dry-run. Read every entry in `missingInputs`, ask the user its `question`, and pass the answer through the listed `option`. Do not write transition reasons into the customizable record body. The CLI stores them in machine-owned frontmatter.
 
-Before moving to `done`, confirm `scope`, `completion`, `verification`, `outcome`, and `knowledge`. Dependencies in `needs` must be `done` only when the work item becomes `done`. Reopen `done` work before adding or removing a dependency.
+Before moving to `done`, inspect `knowledgeReview` in the JSON dry-run. If it has targets, read each target Overview, update the smallest relevant documents, and update an Overview only when its scope or navigation changed. If it has no targets, confirm that the work has no lasting Knowledge impact. Then confirm `scope`, `completion`, `verification`, `outcome`, and `knowledge`. Dependencies in `needs` must be `done` only when the work item becomes `done`. Reopen `done` work before changing dependencies or Knowledge relationships.
 
 ## Record and Overview
 
@@ -63,9 +65,9 @@ For an older workspace, review any `reports/` content and move delivery outputs 
 
 ## Knowledge
 
-`knowledge/registry.md` is the workspace entry point for persistent Knowledge. Each registered kebab-case `Key` maps to `knowledge/<key>/overview.md`; the Registry keeps the separate human-readable `Display name`.
+`knowledge/registry.md` is the workspace entry point for persistent Knowledge. Its managed table uses `Key`, `Path`, `Parent`, and `Display name`. `Key` is a stable, globally unique relationship identifier. `Path` locates the topic below `knowledge/`, `Parent` optionally names another registered key, and `Display name` is for people.
 
-Treat `overview.md` as the entry point for that Knowledge. Users may add any files and nested directories below `knowledge/<key>/`; do not impose names, formats, or a fixed internal structure. Do not create default Knowledge keys or automatically rewrite, merge, or reorganize shared Knowledge. Shared Knowledge is outside every individual work completion seal.
+Every registered path has an `overview.md`. Registered topics may be nested at any depth. Unregistered files and directories below a registered topic are user-owned internal content, not separate Knowledge relationships. Relate Work to the most specific registered key with `work knowledge add`; do not add parent keys automatically. Do not impose names, formats, or a fixed internal structure, and do not automatically rewrite, merge, move, or reorganize shared Knowledge. Shared Knowledge is outside every individual work completion seal.
 
 ## Discard
 

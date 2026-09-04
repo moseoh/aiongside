@@ -13,6 +13,7 @@ The first goal is simple local work management. The second goal is a validation 
 - TypeScript monorepo managed with Bun.
 - Project-local Agent Skills, managed instructions, and lifecycle Hooks installed and validated by the CLI.
 - Record-body freshness tracking for human-readable Overviews implemented.
+- Nested Knowledge Registry validation and Work relationships implemented.
 - Local Web UI reserved for the distant future.
 - TUI excluded from product scope.
 
@@ -107,9 +108,11 @@ views/
   closed.md
 knowledge/
   registry.md
-  <key>/
+  operations/                   # Registered key: operations
     overview.md
-    ...                   # User-defined files and nested directories
+    incident-response/          # Registered key: incident-response
+      overview.md
+      ...                       # User-defined internal content
 ```
 
 `record.md` is the canonical work document. It owns status, progress, decisions, and outcomes. `overview.md` is the short human-readable entry point and does not duplicate dynamic state. Its machine-owned `recordBodyDigest` records which Record Markdown body was last reviewed. `plan.md` is optional and is created when a work item moves to `active`.
@@ -134,9 +137,20 @@ AIongside requires these directories but does not constrain their file names, fo
 
 Older workspaces may contain `reports/` instead of `deliverables/` and may not contain `evidence/`. AIongside does not move or delete those files automatically. Review the existing content, move delivery outputs into a new `deliverables/` directory, and create `evidence/` before running further mutations.
 
-`knowledge/registry.md` is the entry point for persistent Knowledge shared across work items. Each kebab-case key in its `Key` column maps to `knowledge/<key>/overview.md`; the separate `Display name` is for people. New workspaces start with an empty Registry and no default Knowledge keys.
+`knowledge/registry.md` is the entry point for persistent Knowledge shared across work items. Its managed table has `Key`, `Path`, `Parent`, and `Display name` columns. A key is a stable, globally unique relationship identifier. A path locates the topic below `knowledge/`, an optional parent names another registered key, and the display name is for people. New workspaces start with an empty Registry and no default Knowledge keys.
 
-Use each `overview.md` as that Knowledge's entry point. Add any files and nested directories below `knowledge/<key>/` as the subject grows. AIongside does not impose their names, formats, or internal structure and does not rewrite shared Knowledge automatically. Shared Knowledge is outside individual work completion seals. Existing Registry files remain user-owned and are not migrated automatically; a heading that uses the previous classification term can be renamed manually.
+Registered topics can use paths at any depth and each registered path must contain `overview.md`. Unregistered files and directories below a topic remain user-owned internal content rather than independent relationship targets. AIongside does not impose their names, formats, or internal structure and does not rewrite shared Knowledge automatically. Shared Knowledge is outside individual work completion seals.
+
+The legacy two-column `Key` and `Display name` table remains readable: each key resolves to the same top-level path with no parent. AIongside does not rewrite an existing Registry automatically. Once a legacy row is present, its `knowledge/<key>/overview.md` entry point must exist.
+
+Work Records store related Knowledge keys rather than paths, so a registered path can move without breaking Work relationships. Use the most specific registered key and do not add its parents automatically:
+
+```sh
+aiongside work knowledge add WORK-1 incident-response
+aiongside work knowledge remove WORK-1 incident-response
+```
+
+The `done` dry-run returns a `knowledgeReview` object. When it lists targets, review each target Overview and update only the smallest relevant internal documents. Update an Overview only when its scope or navigation changed. When it has no targets, explicitly confirm that the work has no lasting Knowledge impact. Then record the existing `knowledge` confirmation before moving to `done`. Reopening preserves the candidate keys but resets that confirmation for the next completion cycle.
 
 Views are generated from Record metadata and must not be edited directly. `aiongside check` compares each View with a deterministic rendering of current Records. Missing, stale, manually modified, or line-ending-converted Views fail validation without changing files. Run `aiongside view rebuild` for explicit recovery.
 
@@ -183,6 +197,8 @@ aiongside work needs remove WORK-2 WORK-1
 
 Adding a dependency rejects missing, duplicate, self-referencing, and cyclic relationships. Removing an absent relationship succeeds without changing files. Reopen `done` work before changing its dependencies. Confirmations are mechanical review signals; they do not prove that prose is true or complete.
 
+`knowledge` contains stable Registry keys in Record frontmatter. Manage it through `work knowledge add/remove` instead of editing frontmatter directly. Adding or removing a relationship resets the Knowledge confirmation. Reopen `done` work before changing these relationships.
+
 ## Commands
 
 ```text
@@ -198,6 +214,8 @@ aiongside work move <id> <status> --dry-run --json
 aiongside work move <id> <status> [transition options]
 aiongside work needs add <id> <dependency-id>
 aiongside work needs remove <id> <dependency-id>
+aiongside work knowledge add <id> <key>
+aiongside work knowledge remove <id> <key>
 aiongside work cancel <id> --cancellation-reason <text>
 aiongside work discard <id> --dry-run
 aiongside view rebuild

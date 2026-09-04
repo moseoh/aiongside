@@ -7,6 +7,7 @@ import {
 } from "@aiongside/core";
 import {
   addWorkDependency,
+  addWorkKnowledge,
   cancelWork,
   confirmWork,
   createWork,
@@ -21,6 +22,7 @@ import {
   readAgentSessionContext,
   rebuildViews,
   removeWorkDependency,
+  removeWorkKnowledge,
   syncAgentSkills,
   syncWorkOverview,
   validateWorkspace,
@@ -265,6 +267,48 @@ export function createProgram(): Command {
       );
     });
 
+  const knowledge = work
+    .command("knowledge")
+    .description("Manage work item Knowledge relationships");
+
+  knowledge
+    .command("add")
+    .description("Add one Knowledge relationship to a work item")
+    .argument("<id>", "Work item ID")
+    .argument("<key>", "Registered Knowledge key")
+    .action(async (id: string, key: string) => {
+      const root = await commandRoot(program);
+      const result = await addWorkKnowledge(root, id, key);
+      if (!result.changed) {
+        ui.success(
+          `Knowledge relationship already exists — ${result.id} → ${result.key}`,
+        );
+        return;
+      }
+      ui.success(
+        `Added Knowledge relationship — ${result.id} → ${result.key} (${result.path})`,
+      );
+    });
+
+  knowledge
+    .command("remove")
+    .description("Remove one Knowledge relationship from a work item")
+    .argument("<id>", "Work item ID")
+    .argument("<key>", "Knowledge key")
+    .action(async (id: string, key: string) => {
+      const root = await commandRoot(program);
+      const result = await removeWorkKnowledge(root, id, key);
+      if (!result.changed) {
+        ui.success(
+          `Knowledge relationship is already absent — ${result.id} ⇥ ${result.key}`,
+        );
+        return;
+      }
+      ui.success(
+        `Removed Knowledge relationship — ${result.id} ⇥ ${result.key}`,
+      );
+    });
+
   work
     .command("confirm")
     .description("Confirm work checks required by status gates")
@@ -441,6 +485,7 @@ function writeMoveResult(
     missingInputs: result.missingInputs,
     warnings: result.warnings,
     changes: result.changes,
+    knowledgeReview: result.knowledgeReview ?? null,
     invalidatesCompletion: result.invalidatesCompletion,
     canMove: result.canMove,
     applied: result.applied,
@@ -462,6 +507,29 @@ function writeMoveResult(
         detail: input.question,
       })),
     );
+  }
+  if (result.knowledgeReview) {
+    ui.section("Knowledge");
+    if (result.knowledgeReview.targets.length === 0) {
+      ui.rows([
+        {
+          status: result.knowledgeReview.confirmed ? "success" : "warning",
+          label: "Impact",
+          detail: "Confirm that this work has no lasting Knowledge impact",
+        },
+      ]);
+    } else {
+      ui.rows(
+        result.knowledgeReview.targets.map((target) => ({
+          status: result.knowledgeReview?.confirmed ? "success" : "warning",
+          label: target.key,
+          detail: target.overview,
+        })),
+      );
+      ui.hint(
+        "Review the smallest relevant documents; update an Overview only when its scope or navigation changes.",
+      );
+    }
   }
   if (result.changes.length > 0) {
     ui.section("Changes");

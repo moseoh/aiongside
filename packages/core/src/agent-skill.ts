@@ -2,7 +2,7 @@ import { z } from "zod";
 import { DocumentFormatError, parseMarkdownDocument } from "./frontmatter.js";
 
 export const AGENT_SKILL_NAME = "aiongside";
-export const CURRENT_AGENT_SKILL_VERSION = 5;
+export const CURRENT_AGENT_SKILL_VERSION = 6;
 
 const agentSkillMetadataSchema = z
   .object({
