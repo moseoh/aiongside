@@ -5,7 +5,6 @@ import path from "node:path";
 import { test } from "node:test";
 import {
   canonicalInstructionsPath,
-  canonicalSkillPath,
   createConsumerManifest,
   expectedPackageFiles,
   preparePackage,
@@ -22,7 +21,10 @@ test("creates public package metadata from the CLI manifest", async () => {
   const consumer = createConsumerManifest(source);
   assert.equal(consumer.name, "aiongside");
   assert.equal(consumer.version, source.version);
-  assert.deepEqual(consumer.bin, { aiongside: "./dist/bin.js" });
+  assert.deepEqual(consumer.bin, {
+    aiongside: "./dist/bin.js",
+    "aiongside-agent-adapter": "./dist/agent-adapter.js",
+  });
   assert.deepEqual(consumer.engines, { node: ">=22" });
   assert.deepEqual(consumer.repository, {
     type: "git",
@@ -66,13 +68,6 @@ test("prepares only the public package files", async (context) => {
   assert.match(
     await readFile(path.join(stageDirectory, "dist", "bin.js"), "utf8"),
     /^#!\/usr\/bin\/env node/,
-  );
-  assert.equal(
-    await readFile(
-      path.join(stageDirectory, "skills", "aiongside", "SKILL.md"),
-      "utf8",
-    ),
-    await readFile(canonicalSkillPath, "utf8"),
   );
   assert.equal(
     await readFile(

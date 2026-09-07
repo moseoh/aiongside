@@ -1,15 +1,8 @@
 import { createRequire } from "node:module";
 import path from "node:path";
 import {
-  createSessionStartHookOutput,
-  createStopHookOutput,
-  parseAgentHookEvent,
-} from "@aiongside/core";
-import {
   addWorkDependency,
   addWorkKnowledge,
-  cancelWork,
-  confirmWork,
   createKnowledge,
   createWork,
   type DiscardKnowledgePreview,
@@ -28,18 +21,25 @@ import {
   previewDiscardKnowledge,
   previewMoveKnowledge,
   previewMoveWork,
-  readAgentSessionContext,
+  readWorkspaceContext,
   rebuildViews,
   removeWorkDependency,
   removeWorkKnowledge,
   showKnowledge,
-  syncAgentSkills,
-  syncKnowledgeOverview,
+  syncAgentIntegration,
   syncWorkOverview,
+  validateAgentIntegration,
   validateWorkspace,
   WorkspaceError,
 } from "@aiongside/filesystem";
-import { Command, Option } from "commander";
+import { Command, CommanderError, Option } from "commander";
+import {
+  knowledgeMoveActions,
+  knowledgeRoutingActions,
+  workKnowledgeActions,
+  workKnowledgeMessage,
+  writePostActions,
+} from "./knowledge-actions.js";
 import { ui } from "./ui.js";
 import {
   defaultRunProcess,
@@ -47,6 +47,11 @@ import {
   performUpdate,
   type UpdateEvent,
 } from "./update.js";
+import {
+  projectUpdatePreferences,
+  skipUpdateVersion,
+  userUpdatePaths,
+} from "./update-notices.js";
 
 const cliVersion = (
   createRequire(import.meta.url)("../package.json") as { version: string }
@@ -56,32 +61,18 @@ interface GlobalOptions {
   root?: string;
 }
 
-class NamedOption extends Option {
-  constructor(
-    flags: string,
-    description: string,
-    private readonly optionName: string,
-  ) {
-    super(flags, description);
-  }
-
-  override attributeName(): string {
-    return this.optionName;
-  }
-}
-
 const HOOK_TRUST_NOTICE =
   "Approve project Hooks in Claude Code or Codex CLI when prompted. AIongside does not change user trust settings.";
 
-function writeAgentSkillSyncResult(
-  result: Awaited<ReturnType<typeof syncAgentSkills>>,
+function writeIntegrationSyncResult(
+  result: Awaited<ReturnType<typeof syncAgentIntegration>>,
 ): void {
   if (result.changes.length === 0) {
     ui.success(`Agent integration is current (version ${result.version})`);
     ui.warning(HOOK_TRUST_NOTICE);
     return;
   }
-  ui.success(`Agent integration synced (version ${result.version})`);
+  ui.success(`Agent workspace upgraded (version ${result.version})`);
   ui.rows(
     result.changes.map((change) => ({
       status: change.action === "created" ? "create" : "update",
@@ -110,7 +101,7 @@ function writeUpdateEvent(event: UpdateEvent): void {
       ui.success(`Installed AIongside ${event.version}`);
       return;
     case "complete":
-      ui.success("CLI and workspace agent integration updated");
+      ui.success("CLI updated; workspace integrations were not changed");
   }
 }
 
@@ -118,6 +109,7 @@ export function createProgram(): Command {
   const program = new Command();
   program
     .name("aiongside")
+    .exitOverride()
     .description("A local-first workspace for people and AI")
     .version(cliVersion)
     .option("--root <path>", "AIongside workspace path");
@@ -140,12 +132,6 @@ export function createProgram(): Command {
         { label: "ID prefix", detail: config.idPrefix },
         {
           status: "create",
-          label: "Agent Skills",
-          detail:
-            ".agents/skills/aiongside/SKILL.md · .claude/skills/aiongside/SKILL.md",
-        },
-        {
-          status: "create",
           label: "Instructions",
           detail: ".aiongside/instructions.md",
         },
@@ -163,13 +149,28 @@ export function createProgram(): Command {
 
   program
     .command("update")
-    .description("Update the CLI and current workspace agent integration")
+    .description("Update the global CLI from any directory")
     .option("--yes", "Approve the displayed global npm update")
-    .action(async (options: { yes?: boolean }) => {
-      const root = await commandRoot(program);
+    .addOption(
+      new Option(
+        "--skip-version <version>",
+        "Stop notices for this CLI release in all workspaces",
+      ).conflicts("yes"),
+    )
+    .action(async (options: { yes?: boolean; skipVersion?: string }) => {
+      if (options.skipVersion !== undefined) {
+        const result = await skipUpdateVersion(
+          userUpdatePaths().preferences,
+          options.skipVersion,
+          "user",
+        );
+        ui.success(
+          `CLI release ${result.version} notices skipped (${result.scope}) — ${result.path}. No installation performed.`,
+        );
+        return;
+      }
       await performUpdate(
         {
-          root,
           currentVersion: cliVersion,
           ...(options.yes ? { yes: true } : {}),
         },
@@ -178,51 +179,37 @@ export function createProgram(): Command {
           interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
           confirm: () => ui.confirm("Install this update?"),
           runProcess: defaultRunProcess,
-          syncCurrent: async (workspaceRoot) => {
-            writeAgentSkillSyncResult(await syncAgentSkills(workspaceRoot));
-          },
           report: writeUpdateEvent,
         },
       );
     });
 
-  const skill = program
-    .command("skill")
+  const integration = program
+    .command("workspace")
     .description("Manage the agent integration bundle");
 
-  skill
-    .command("sync")
+  integration
+    .command("upgrade")
     .description("Restore managed agent integration from the installed CLI")
-    .action(async () => {
+    .option(
+      "--skip-version <version>",
+      "Stop notices for this integration version in this workspace",
+    )
+    .action(async (options: { skipVersion?: string }) => {
       const root = await commandRoot(program);
-      const result = await syncAgentSkills(root);
-      writeAgentSkillSyncResult(result);
-    });
-
-  const hook = program
-    .command("hook")
-    .description("Run project lifecycle Hooks for supported AI agents");
-
-  hook
-    .command("session-start")
-    .description("Inject AIongside instructions into an agent session")
-    .action(async () => {
-      const event = parseHookInput(await readStandardInput(), "SessionStart");
-      const root = await findWorkspaceRoot(path.resolve(event.cwd));
-      const context = await readAgentSessionContext(root);
-      writeHookOutput(createSessionStartHookOutput(context));
-    });
-
-  hook
-    .command("stop")
-    .description("Validate the workspace before an agent session stops")
-    .action(async () => {
-      const event = parseHookInput(await readStandardInput(), "Stop");
-      const root = await findWorkspaceRoot(path.resolve(event.cwd));
-      const issues = await validateWorkspace(root);
-      writeHookOutput(
-        createStopHookOutput(issues, event.stop_hook_active === true),
-      );
+      if (options.skipVersion !== undefined) {
+        const result = await skipUpdateVersion(
+          projectUpdatePreferences(root),
+          options.skipVersion,
+          "project",
+        );
+        ui.success(
+          `Integration ${result.version} notices skipped (${result.scope}) — ${result.path}. No upgrade performed.`,
+        );
+        return;
+      }
+      const result = await syncAgentIntegration(root);
+      writeIntegrationSyncResult(result);
     });
 
   const work = program
@@ -246,7 +233,10 @@ export function createProgram(): Command {
       .command("move")
       .description("Move a work item to another status")
       .argument("<id>", "Work item ID")
-      .argument("<status>", "Target status"),
+      .argument(
+        "<status>",
+        "Target status: inbox, active, waiting, done, cancelled",
+      ),
   ).action(async (id: string, status: string, options: MoveCliOptions) => {
     const root = await commandRoot(program);
     const moveOptions = toMoveOptions(options);
@@ -294,89 +284,82 @@ export function createProgram(): Command {
 
   const workKnowledge = work
     .command("knowledge")
-    .description("Manage work item Knowledge relationships");
+    .description(
+      "Record which Knowledge incorporates a completed Work's results",
+    );
 
   workKnowledge
     .command("add")
-    .description("Add one Knowledge relationship to a work item")
+    .description(
+      "Record that this completed Work's results were incorporated into Knowledge",
+    )
+    .addHelpText(
+      "after",
+      "\nIncorporate the Work results into Knowledge before running add. This records a contribution, not a reference or a request to update content. Do not add topics that were only consulted. The CLI records your assertion; it does not edit content or verify incorporation. Repeating add makes no changes.",
+    )
     .argument("<id>", "Work item ID")
-    .argument("<key>", "Registered Knowledge key")
-    .action(async (id: string, key: string) => {
+    .argument("<key>", "Knowledge document key")
+    .option("--json", "Print the relationship result and follow-up actions")
+    .action(async (id: string, key: string, options: { json?: boolean }) => {
       const root = await commandRoot(program);
       const result = await addWorkKnowledge(root, id, key);
-      if (!result.changed) {
-        ui.success(
-          `Knowledge relationship already exists — ${result.id} → ${result.key}`,
-        );
+      const output = {
+        ...result,
+        record: `work/${result.id}/record.md`,
+        message: workKnowledgeMessage(result),
+        postActions: workKnowledgeActions(result),
+      };
+      if (options.json) {
+        ui.json(output, true);
         return;
       }
-      ui.success(
-        `Added Knowledge relationship — ${result.id} → ${result.key} (${result.path})`,
-      );
+      ui.success(output.message);
     });
 
   workKnowledge
     .command("remove")
-    .description("Remove one Knowledge relationship from a work item")
+    .description(
+      "Remove a Work's contribution record without deleting Knowledge content",
+    )
     .argument("<id>", "Work item ID")
     .argument("<key>", "Knowledge key")
-    .action(async (id: string, key: string) => {
+    .option("--json", "Print the relationship result and follow-up actions")
+    .action(async (id: string, key: string, options: { json?: boolean }) => {
       const root = await commandRoot(program);
       const result = await removeWorkKnowledge(root, id, key);
-      if (!result.changed) {
-        ui.success(
-          `Knowledge relationship is already absent — ${result.id} ⇥ ${result.key}`,
-        );
+      const output = {
+        ...result,
+        record: `work/${result.id}/record.md`,
+        message: workKnowledgeMessage(result),
+        postActions: workKnowledgeActions(result),
+      };
+      if (options.json) {
+        ui.json(output, true);
         return;
       }
-      ui.success(
-        `Removed Knowledge relationship — ${result.id} ⇥ ${result.key}`,
-      );
-    });
-
-  work
-    .command("confirm")
-    .description("Confirm work checks required by status gates")
-    .argument("<id>", "Work item ID")
-    .argument(
-      "<checks...>",
-      "scope, completion, verification, outcome, knowledge",
-    )
-    .action(async (id: string, checks: string[]) => {
-      const root = await commandRoot(program);
-      const metadata = await confirmWork(root, id, checks);
-      ui.success(
-        `Confirmed ${metadata.id} — ${checks.map((check) => check.toLowerCase()).join(", ")}`,
-      );
+      ui.success(output.message);
+      writePostActions(output.postActions);
     });
 
   work
     .command("sync")
-    .description("Confirm Overview review against the current Record body")
+    .description(
+      "Record the current Record body hash after comparing the Overview",
+    )
     .argument("<id>", "Work item ID")
     .action(async (id: string) => {
       const root = await commandRoot(program);
       const result = await syncWorkOverview(root, id);
       if (!result.changed) {
-        ui.success(`Overview is current for ${result.id} — ${result.path}`);
+        ui.success(
+          `Record body hash already matches for ${result.id} — ${result.path}; no files changed`,
+        );
         return;
       }
-      ui.success(`Synced ${result.id} — ${result.path}`);
+      ui.success(
+        `Recorded current Record body hash for ${result.id} — ${result.path}; Overview body unchanged`,
+      );
     });
-
-  addTransitionOptions(
-    work
-      .command("cancel")
-      .description("Cancel a work item and preserve its history")
-      .argument("<id>", "Work item ID"),
-  ).action(async (id: string, options: MoveCliOptions) => {
-    const root = await commandRoot(program);
-    const moveOptions = toMoveOptions(options);
-    const result = options.dryRun
-      ? await previewMoveWork(root, id, "cancelled", moveOptions)
-      : await cancelWork(root, id, moveOptions);
-    writeMoveResult(result, options);
-  });
 
   work
     .command("discard")
@@ -420,120 +403,84 @@ export function createProgram(): Command {
 
   const knowledge = program
     .command("knowledge")
-    .description("Create, move, discard, explore, and sync Knowledge");
+    .description("Manage Knowledge documents and routing");
 
   knowledge
     .command("new")
-    .description("Create a Knowledge topic or register an existing directory")
+    .description("Create a Knowledge document with a unique frontmatter key")
     .argument("<key>", "Globally unique Knowledge key")
-    .option("--display-name <name>", "Human-readable topic name")
-    .option("--path <path>", "Path relative to knowledge/")
-    .option("--parent <key>", "Registered parent Knowledge key")
+    .option("--display-name <name>", "Human-readable document title")
+    .option(
+      "--path <path>",
+      "Markdown file path relative to knowledge/; defaults to <key>.md",
+    )
     .option("--json", "Print a structured creation result")
     .action(
       async (
         key: string,
-        options: {
-          displayName?: string;
-          path?: string;
-          parent?: string;
-          json?: boolean;
-        },
+        options: { displayName?: string; path?: string; json?: boolean },
       ) => {
         const root = await commandRoot(program);
-        const result = await createKnowledge(root, {
-          key,
-          ...(options.displayName ? { displayName: options.displayName } : {}),
-          ...(options.path ? { path: options.path } : {}),
-          ...(options.parent ? { parent: options.parent } : {}),
-        });
+        const result = await createKnowledge(root, { key, ...options });
+        const postActions = knowledgeRoutingActions(
+          result.indexPaths,
+          `Created knowledge/${result.path}. Write the reusable knowledge in this document.`,
+        );
         if (options.json) {
-          ui.json(result, true);
+          ui.json({ ...result, postActions }, true);
           return;
         }
-        ui.success(
-          `${result.adopted ? "Registered" : "Created"} Knowledge — ${result.key}`,
-        );
-        ui.rows([
-          { label: "Path", detail: result.path },
-          { label: "Parent", detail: result.parent ?? "—" },
-          { label: "Overview", detail: result.overview },
-          {
-            status: result.fresh ? "success" : "warning",
-            label: "Freshness",
-            detail: result.fresh ? "fresh" : "stale",
-          },
-        ]);
-        writeKnowledgeStaleHint(result.staleKeys);
+        ui.success(`Created Knowledge — ${result.key}`);
+        ui.rows([{ label: "Path", detail: result.document }]);
+        writePostActions(postActions);
       },
     );
 
   knowledge
     .command("move")
-    .description("Move a Knowledge topic and its physical subtree")
-    .argument("<key>", "Registered Knowledge key")
-    .requiredOption("--path <path>", "New path relative to knowledge/")
-    .option("--parent <key>", "Set a registered parent Knowledge key")
-    .addOption(
-      new NamedOption(
-        "--no-parent",
-        "Move the topic to the top-level hierarchy",
-        "noParent",
-      ).default(undefined),
+    .description(
+      "Move one Knowledge document; preserve its key and Work relationships",
+    )
+    .argument("<key>", "Knowledge document key")
+    .requiredOption(
+      "--path <path>",
+      "New Markdown file path relative to knowledge/",
     )
     .option("--dry-run", "Show move effects without writing")
     .option("--json", "Print a structured move result")
     .action(
       async (
         key: string,
-        options: {
-          path: string;
-          parent?: string;
-          noParent?: boolean;
-          dryRun?: boolean;
-          json?: boolean;
-        },
+        options: { path: string; dryRun?: boolean; json?: boolean },
       ) => {
         const root = await commandRoot(program);
-        const noParent = options.noParent === false;
-        const parent = options.parent;
-        if (parent && noParent) {
-          throw new WorkspaceError(
-            "Use either --parent or --no-parent, not both.",
-            "AIO-KNOWLEDGE-PARENT",
-          );
-        }
-        const moveOptions = noParent
-          ? { parent: null }
-          : parent
-            ? { parent }
-            : { preserveParent: true };
         const result = options.dryRun
-          ? await previewMoveKnowledge(root, key, options.path, moveOptions)
-          : await moveKnowledge(root, key, options.path, moveOptions);
+          ? await previewMoveKnowledge(root, key, options.path)
+          : await moveKnowledge(root, key, options.path);
+        const postActions = knowledgeMoveActions(result);
         if (options.json) {
-          ui.json(result, true);
+          ui.json({ ...result, postActions }, true);
           return;
         }
-        ui[options.dryRun ? "info" : "success"](
-          `${options.dryRun ? "Move preview" : "Moved Knowledge"} — ${result.key}`,
+        ui[result.applied ? "success" : "info"](
+          `${result.applied ? "Moved Knowledge" : "Move preview / no change"} — ${result.key}`,
         );
         ui.rows([
           { label: "Source", detail: result.sourcePath },
           { label: "Destination", detail: result.destinationPath },
-          { label: "Parent", detail: result.parent ?? "—" },
-          { label: "Moved keys", detail: result.movedKeys.join(", ") },
         ]);
         for (const warning of result.warnings) ui.warning(warning);
-        writeKnowledgeStaleHint(result.staleKeys);
-        if (options.dryRun) ui.summary("No changes made");
+        writePostActions(postActions);
+        if (!result.applied) ui.summary("No changes made");
       },
     );
 
   knowledge
     .command("discard")
-    .description("Move a leaf Knowledge topic to recoverable trash")
-    .argument("<key>", "Registered Knowledge key")
+    .description(
+      "Move one unreferenced Knowledge document to recoverable trash",
+    )
+    .argument("<key>", "Knowledge document key")
     .option("--dry-run", "Show discard effects without writing")
     .option("--confirm <key>", "Confirm the exact normalized key")
     .option("--json", "Print a structured discard result")
@@ -546,7 +493,7 @@ export function createProgram(): Command {
         if (options.dryRun) {
           const result = await previewDiscardKnowledge(root, key);
           if (options.json) {
-            ui.json({ ...result, applied: false }, true);
+            ui.json({ ...result, applied: false, postActions: [] }, true);
             return;
           }
           ui.info(`Discard preview — ${result.key}`);
@@ -554,61 +501,61 @@ export function createProgram(): Command {
           ui.summary("No changes made");
           return;
         }
-        if (!options.confirm) {
+        if (!options.confirm)
           throw new WorkspaceError(
             `Run \`aiongside knowledge discard ${key} --dry-run\`, review the result, then use --confirm ${key.trim().toLowerCase()}.`,
             "AIO-KNOWLEDGE-DISCARD-CONFIRM",
           );
-        }
         const result = await discardKnowledge(root, key, options.confirm);
+        const postActions = knowledgeRoutingActions(
+          result.indexPaths,
+          `Discarded knowledge/${result.path}; other documents and attachments were preserved. Remove or repair links to this path; do not guess a replacement.`,
+        );
         if (options.json) {
-          ui.json(result, true);
+          ui.json({ ...result, postActions }, true);
           return;
         }
         ui.success(`Discarded Knowledge — ${result.key}`);
         writeKnowledgeDiscardRows(result);
-        writeKnowledgeStaleHint(result.staleKeys);
+        writePostActions(postActions);
       },
     );
 
   knowledge
     .command("list")
-    .description("List registered Knowledge and freshness")
+    .description("Scan Knowledge document keys and current paths")
     .option("--json", "Print structured Knowledge data")
     .action(async (options: { json?: boolean }) => {
-      const root = await commandRoot(program);
-      const items = await listKnowledge(root);
+      const items = await listKnowledge(await commandRoot(program));
       if (options.json) {
         ui.json(items, true);
         return;
       }
       if (items.length === 0) {
-        ui.info("No Knowledge registered");
+        ui.info("No Knowledge documents");
         return;
       }
       ui.section("Knowledge");
       ui.rows(
         items.map((item) => ({
-          status: item.fresh ? "success" : "warning",
           label: item.key,
-          detail: `${item.displayName} — ${item.path} — ${item.fresh ? "fresh" : "stale"}`,
+          detail: `${item.displayName} — ${item.path}`,
         })),
       );
     });
 
   knowledge
     .command("tree")
-    .description("Show the registered Knowledge hierarchy")
+    .description("Show Knowledge folders and documents")
     .option("--json", "Print structured Knowledge data")
     .action(async (options: { json?: boolean }) => {
-      const root = await commandRoot(program);
-      const tree = await getKnowledgeTree(root);
+      const tree = await getKnowledgeTree(await commandRoot(program));
       if (options.json) {
         ui.json(tree, true);
         return;
       }
       if (tree.length === 0) {
-        ui.info("No Knowledge registered");
+        ui.info("No Knowledge documents");
         return;
       }
       ui.section("Knowledge tree");
@@ -617,12 +564,11 @@ export function createProgram(): Command {
 
   knowledge
     .command("show")
-    .description("Show one registered Knowledge topic")
-    .argument("<key>", "Registered Knowledge key")
+    .description("Resolve a Knowledge document key to its current path")
+    .argument("<key>", "Knowledge document key")
     .option("--json", "Print structured Knowledge data")
     .action(async (key: string, options: { json?: boolean }) => {
-      const root = await commandRoot(program);
-      const item = await showKnowledge(root, key);
+      const item = await showKnowledge(await commandRoot(program), key);
       if (options.json) {
         ui.json(item, true);
         return;
@@ -630,68 +576,58 @@ export function createProgram(): Command {
       ui.section(item.displayName);
       ui.rows([
         { label: "Key", detail: item.key },
-        { label: "Path", detail: item.path },
-        { label: "Parent", detail: item.parent ?? "—" },
-        { label: "Children", detail: item.children.join(", ") || "—" },
-        { label: "Overview", detail: item.overview },
-        {
-          status: item.fresh ? "success" : "warning",
-          label: "Freshness",
-          detail: item.fresh ? "fresh" : "stale",
-        },
+        { label: "Path", detail: item.document },
+        { label: "Index", detail: item.index },
       ]);
-    });
-
-  knowledge
-    .command("sync")
-    .description("Record review of a Knowledge Overview and owned content")
-    .argument("<key>", "Registered Knowledge key")
-    .option("--json", "Print a structured sync result")
-    .action(async (key: string, options: { json?: boolean }) => {
-      const root = await commandRoot(program);
-      const result = await syncKnowledgeOverview(root, key);
-      if (options.json) {
-        ui.json(result, true);
-        return;
-      }
-      if (!result.changed) {
-        ui.success(`Knowledge is current — ${result.key} (${result.overview})`);
-        return;
-      }
-      ui.success(`Synced Knowledge — ${result.key} (${result.overview})`);
     });
 
   const view = program.command("view").description("Manage generated Views");
 
   view
-    .command("rebuild")
+    .command("sync")
     .description("Rebuild Views from work Records")
     .action(async () => {
       const root = await commandRoot(program);
       await rebuildViews(root);
-      ui.success("Views rebuilt");
+      ui.success("Views synced");
     });
 
-  program
-    .command("check")
-    .description("Validate workspace structure without writing")
-    .action(async () => {
-      const root = await commandRoot(program);
-      const issues = await validateWorkspace(root);
-      if (issues.length === 0) {
-        ui.success("Check passed");
-        return;
-      }
-      for (const issue of issues) {
-        ui.error({
-          code: issue.code,
-          path: issue.path,
-          message: issue.message,
-          ...(issue.hint ? { hint: issue.hint } : {}),
-        });
-      }
-      process.exitCode = 1;
-    });
+  for (const name of ["context", "check", "doctor"] as const) {
+    program
+      .command(name)
+      .description(
+        name === "context"
+          ? "Read managed AIongside instructions"
+          : name === "check"
+            ? "Check document hashes and mechanical integrity without writing"
+            : "Check installed agent integration without writing",
+      )
+      .option("--json", "Print a versioned machine-readable result")
+      .action(async (options: { json?: boolean }) => {
+        const root = await commandRoot(program);
+        const result =
+          name === "context"
+            ? await readWorkspaceContext(root)
+            : await (async () => {
+                const issues = await (name === "check"
+                  ? validateWorkspace(root)
+                  : validateAgentIntegration(root));
+                return { version: 1, root, ok: issues.length === 0, issues };
+              })();
+        if (options.json) ui.json(result);
+        else {
+          if ("instructions" in result) {
+            process.stdout.write(`${result.instructions ?? ""}\n`);
+          }
+          for (const issue of result.issues) ui.error(issue);
+          if (result.ok && name !== "context")
+            ui.success(
+              `${name.charAt(0).toUpperCase()}${name.slice(1)} passed`,
+            );
+        }
+        process.exitCode = result.ok ? 0 : 1;
+      });
+  }
 
   return program;
 }
@@ -709,33 +645,19 @@ interface MoveCliOptions {
 function flattenKnowledgeTree(
   nodes: KnowledgeTreeNode[],
   depth = 0,
-): Array<{ status: "success" | "warning"; label: string; detail: string }> {
+): Array<{ label: string; detail: string }> {
   return nodes.flatMap((node) => [
     {
-      status: node.fresh ? ("success" as const) : ("warning" as const),
-      label: `${"  ".repeat(depth)}${node.key}`,
-      detail: `${node.path} — ${node.fresh ? "fresh" : "stale"}`,
+      label: `${"  ".repeat(depth)}${node.key ?? node.displayName}`,
+      detail: node.path,
     },
     ...flattenKnowledgeTree(node.children, depth + 1),
   ]);
 }
 
-function writeKnowledgeStaleHint(keys: string[]): void {
-  if (keys.length === 0) return;
-  ui.warning(`Knowledge review required — ${keys.join(", ")}`);
-  ui.hint(
-    `Review each Overview and owned content, then run ${keys.map((key) => `\`aiongside knowledge sync ${key}\``).join(", ")}.`,
-  );
-}
-
 function writeKnowledgeDiscardRows(result: DiscardKnowledgePreview): void {
   ui.rows([
     { label: "Path", detail: result.path },
-    {
-      status: result.childKeys.length > 0 ? "warning" : "info",
-      label: "Child keys",
-      detail: result.childKeys.join(", ") || "—",
-    },
     {
       status: result.referencedBy.length > 0 ? "warning" : "info",
       label: "Referenced by",
@@ -792,7 +714,7 @@ function writeMoveResult(
     missingInputs: result.missingInputs,
     warnings: result.warnings,
     changes: result.changes,
-    knowledgeReview: result.knowledgeReview ?? null,
+    ...(result.postActions ? { postActions: result.postActions } : {}),
     invalidatesCompletion: result.invalidatesCompletion,
     canMove: result.canMove,
     applied: result.applied,
@@ -815,31 +737,14 @@ function writeMoveResult(
       })),
     );
   }
-  if (result.knowledgeReview) {
-    ui.section("Knowledge");
-    if (result.knowledgeReview.targets.length === 0) {
-      ui.rows([
-        {
-          status: result.knowledgeReview.confirmed ? "success" : "warning",
-          label: "Impact",
-          detail: "Confirm that this work has no lasting Knowledge impact",
-        },
-      ]);
-    } else {
-      ui.rows(
-        result.knowledgeReview.targets.map((target) => ({
-          status:
-            result.knowledgeReview?.confirmed && target.fresh
-              ? "success"
-              : "warning",
-          label: target.key,
-          detail: `${target.overview} — ${target.fresh ? "fresh" : "stale"}`,
-        })),
-      );
-      ui.hint(
-        "Review the smallest relevant documents; update an Overview only when its scope or navigation changes.",
-      );
-    }
+  for (const action of result.postActions ?? []) {
+    ui.hint(action.message);
+    ui.rows(
+      action.targets.map((target) => ({
+        label: target.key,
+        detail: `knowledge/${target.path}`,
+      })),
+    );
   }
   if (result.changes.length > 0) {
     ui.section("Changes");
@@ -867,6 +772,27 @@ export async function run(argv = process.argv): Promise<void> {
   try {
     await program.parseAsync(argv);
   } catch (error) {
+    if (error instanceof CommanderError && error.exitCode === 0) return;
+    if (
+      argv.includes("--json") &&
+      ["context", "check", "doctor"].includes(program.args[0] ?? "")
+    ) {
+      ui.json({
+        version: 1,
+        root: program.opts<GlobalOptions>().root ?? process.cwd(),
+        ok: false,
+        issues: [
+          {
+            code:
+              error instanceof WorkspaceError ? error.code : "AIO-UNEXPECTED",
+            path: "",
+            message: error instanceof Error ? error.message : String(error),
+          },
+        ],
+      });
+      process.exitCode = 2;
+      return;
+    }
     if (error instanceof WorkspaceError) {
       ui.error({ code: error.code, message: error.message });
       process.exitCode = 2;
@@ -883,31 +809,4 @@ async function commandRoot(program: Command): Promise<string> {
   return findWorkspaceRoot(
     options.root ? path.resolve(options.root) : process.cwd(),
   );
-}
-
-function parseHookInput(source: string, expected: "SessionStart" | "Stop") {
-  try {
-    return parseAgentHookEvent(source, expected);
-  } catch (error) {
-    throw new WorkspaceError(
-      `Invalid ${expected} Hook input: ${errorMessage(error)}`,
-      "AIO-HOOK-INPUT",
-    );
-  }
-}
-
-async function readStandardInput(): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
-
-function writeHookOutput(output: Record<string, unknown>): void {
-  ui.json(output);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

@@ -1,6 +1,6 @@
 {
   "name": "aiongside",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A local-first workspace for people and AI",
   "license": "MIT",
   "repository": {
@@ -14,12 +14,13 @@
   },
   "type": "module",
   "bin": {
-    "aiongside": "./dist/bin.js"
+    "aiongside": "./dist/bin.js",
+    "aiongside-agent-adapter": "./dist/agent-adapter.js"
   },
   "files": [
     "dist/bin.js",
-    "instructions/aiongside.md",
-    "skills/aiongside/SKILL.md"
+    "dist/agent-adapter.js",
+    "instructions/aiongside.md"
   ],
   "publishConfig": {
     "access": "public",

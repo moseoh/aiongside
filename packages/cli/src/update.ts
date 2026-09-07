@@ -13,7 +13,6 @@ interface ParsedVersion {
 }
 
 export interface UpdateOptions {
-  root: string;
   currentVersion: string;
   yes?: boolean;
 }
@@ -23,7 +22,6 @@ export interface UpdateRuntime {
   interactive: boolean;
   confirm: () => Promise<boolean>;
   runProcess: (command: string, args: string[]) => Promise<number>;
-  syncCurrent: (root: string) => Promise<void>;
   report: (event: UpdateEvent) => void;
 }
 
@@ -41,7 +39,17 @@ export type UpdateEvent =
 
 export function parseSemanticVersion(version: string): ParsedVersion {
   const match = SEMVER_PATTERN.exec(version);
-  if (!match) {
+  if (
+    !match ||
+    ![match[1], match[2], match[3]].every((part) =>
+      Number.isSafeInteger(Number(part)),
+    ) ||
+    match[4]
+      ?.split(".")
+      .some(
+        (part) => /^\d+$/.test(part) && part.length > 1 && part.startsWith("0"),
+      )
+  ) {
     throw new WorkspaceError(
       `Invalid semantic version: ${version}`,
       "AIO-UPDATE-CHECK",
@@ -97,11 +105,12 @@ export function compareSemanticVersions(left: string, right: string): number {
 
 export async function fetchLatestVersion(
   fetcher: typeof fetch = globalThis.fetch,
+  timeoutMs = 10_000,
 ): Promise<string> {
   try {
     const response = await fetcher(REGISTRY_URL, {
       headers: { accept: "application/json" },
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) {
       throw new Error(`npm registry returned HTTP ${response.status}`);
@@ -114,7 +123,7 @@ export async function fetchLatestVersion(
     return data.version;
   } catch (error) {
     throw new WorkspaceError(
-      `Cannot check the latest npm version: ${errorMessage(error)}. Run \`aiongside skill sync\` for an offline skill repair.`,
+      `Cannot check the latest npm version: ${errorMessage(error)}. Check your connection and retry \`aiongside update\`.`,
       "AIO-UPDATE-CHECK",
     );
   }
@@ -131,14 +140,13 @@ export async function performUpdate(
     parseSemanticVersion(latestVersion);
   } catch (error) {
     throw new WorkspaceError(
-      `Cannot check the latest npm version: ${errorMessage(error)}. Run \`aiongside skill sync\` for an offline skill repair.`,
+      `Cannot check the latest npm version: ${errorMessage(error)}. Check your connection and retry \`aiongside update\`.`,
       "AIO-UPDATE-CHECK",
     );
   }
 
   if (compareSemanticVersions(latestVersion, options.currentVersion) <= 0) {
     runtime.report({ type: "current", version: options.currentVersion });
-    await runtime.syncCurrent(options.root);
     return;
   }
 
@@ -185,20 +193,6 @@ export async function performUpdate(
   }
 
   runtime.report({ type: "installed", version: latestVersion });
-  let syncStatus: number;
-  try {
-    syncStatus = await runtime.runProcess("aiongside", [
-      "--root",
-      options.root,
-      "skill",
-      "sync",
-    ]);
-  } catch (error) {
-    throw updateSyncError(options.root, errorMessage(error));
-  }
-  if (syncStatus !== 0) {
-    throw updateSyncError(options.root, `exit status ${syncStatus}`);
-  }
   runtime.report({ type: "complete" });
 }
 
@@ -217,13 +211,6 @@ export function defaultRunProcess(
       resolve(code ?? 1);
     });
   });
-}
-
-function updateSyncError(root: string, detail: string): WorkspaceError {
-  return new WorkspaceError(
-    `AIongside was updated globally, but workspace skill sync failed (${detail}). Run \`aiongside skill sync --root ${root}\` manually.`,
-    "AIO-UPDATE-SYNC",
-  );
 }
 
 function errorMessage(error: unknown): string {

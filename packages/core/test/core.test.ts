@@ -1,33 +1,21 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
 import { describe, expect, test } from "vitest";
 import {
-  AGENT_SKILL_NAME,
-  CURRENT_AGENT_SKILL_VERSION,
   calculateMarkdownBodyDigest,
   compareWorkIds,
+  createKnowledgeDocument,
   createOverviewDocument,
+  createPlanDocument,
   createRecordDocument,
-  createRulesDocument,
-  createSessionStartHookOutput,
-  createStopHookOutput,
   evaluateTransition,
-  formatKnowledgeOverviewDocument,
   formatMarkdownDocument,
-  isExactAgentSkillSource,
+  markdownLinks,
+  normalizeKnowledgeKey,
+  normalizeKnowledgePath,
   overviewMetadataSchema,
-  parseAgentHookEvent,
-  parseAgentSkill,
-  parseKnowledgeOverviewDocument,
-  parseKnowledgeRegistry,
+  parseKnowledgeDocument,
   parseMarkdownDocument,
-  planKnowledgeCreate,
-  planKnowledgeDiscard,
-  planKnowledgeMove,
-  renderKnowledgeRegistry,
   renderViews,
   replaceMarkdownMetadata,
-  validateKnowledgeRegistryEntries,
   WORK_STATUSES,
   workMetadataSchema,
   workspaceConfigSchema,
@@ -52,6 +40,26 @@ const metadata = workMetadataSchema.parse({
 });
 
 describe("Markdown document", () => {
+  test("keeps default writing hints in HTML comments rather than visible content", () => {
+    const documents = [
+      parseMarkdownDocument(createRecordDocument(metadata)).body,
+      parseMarkdownDocument(createOverviewDocument(metadata, "a".repeat(64)))
+        .body,
+      createPlanDocument(),
+    ];
+    for (const body of documents) {
+      expect(body).toContain("<!--");
+      expect(body).toContain("-->");
+      expect(body).not.toContain("{{title}}");
+      const visibleLines = body
+        .replace(/<!--[\s\S]*?-->/g, "")
+        .split("\n")
+        .filter((line) => line.trim());
+      expect(visibleLines.length).toBeGreaterThan(0);
+      expect(visibleLines.every((line) => /^#{1,6} /.test(line))).toBe(true);
+    }
+  });
+
   test("round-trips frontmatter and body", () => {
     const source = createRecordDocument(metadata);
     const parsed = parseMarkdownDocument(source);
@@ -200,383 +208,95 @@ describe("Markdown document", () => {
   });
 });
 
-describe("Knowledge Overview document", () => {
-  const managed = {
-    schema: 1 as const,
-    key: "development-environment",
-    contentDigest: "a".repeat(64),
-  };
-
-  test("adds managed metadata without changing a plain Markdown body", () => {
-    const source = "# Development environment\n\nUser-owned body.  \n";
-    const formatted = formatKnowledgeOverviewDocument(source, managed);
-    const parsed = parseKnowledgeOverviewDocument(formatted);
-
-    expect(parsed.managed).toEqual(managed);
-    expect(formatted.endsWith(source)).toBe(true);
+describe("Knowledge documents", () => {
+  test("creates and scans a stable key while allowing user metadata", () => {
+    const source = createKnowledgeDocument({
+      key: "venue",
+      displayName: "Venues",
+    });
+    expect(parseKnowledgeDocument(source, "events/venue.md")).toEqual({
+      key: "venue",
+      path: "events/venue.md",
+      displayName: "Venues",
+    });
+    expect(
+      parseKnowledgeDocument(
+        source.replace("---\n", "---\nowner: events\n"),
+        "venue.md",
+      ).key,
+    ).toBe("venue");
+    expect(normalizeKnowledgeKey(" Venue ")).toBe("venue");
   });
-
-  test("preserves user frontmatter values and CRLF body bytes", () => {
+  test.each([
+    "",
+    "../file.md",
+    "/file.md",
+    "C:/file.md",
+    "folder",
+    "index.md",
+    "a/index.md",
+    "a/../file.md",
+    "a//file.md",
+  ])("rejects unsafe or reserved file path %s", (value) => {
+    expect(() => normalizeKnowledgePath(value)).toThrow();
+  });
+  test("requires valid managed metadata, not a content hash", () => {
+    expect(() => parseKnowledgeDocument("# Plain", "plain.md")).toThrow();
+    expect(() =>
+      parseKnowledgeDocument(
+        "---\naiongside: {schema: 1, key: Bad}\n---\n",
+        "bad.md",
+      ),
+    ).toThrow();
+    expect(
+      parseKnowledgeDocument(
+        "---\naiongside: {schema: 1, key: good}\n---\n",
+        "good.md",
+      ).displayName,
+    ).toBe("good");
+    expect(() =>
+      parseKnowledgeDocument(
+        "---\naiongside: {schema: 1, key: good, contentDigest: old}\n---\n",
+        "good.md",
+      ),
+    ).toThrow();
+  });
+  test("extracts real inline, reference, and image links but not examples or comments", () => {
     const source = [
       "---",
-      "owner: platform",
-      "labels:",
-      "  - internal",
+      "example: '[not](metadata.md)'",
       "---",
       "",
-      "# Development environment  ",
+      "[File](file.md) [Space](<two words.md>) ![Image](pic.png)",
+      "[Ref][target]",
       "",
-    ].join("\r\n");
-    const bodyStart = source.indexOf("\r\n---\r\n") + "\r\n---".length;
-    const formatted = formatKnowledgeOverviewDocument(source, managed);
-    const parsed = parseKnowledgeOverviewDocument(formatted);
-
-    expect(parsed.metadata).toEqual(
-      expect.objectContaining({
-        owner: "platform",
-        labels: ["internal"],
-      }),
-    );
-    expect(formatted.slice(formatted.indexOf("\r\n---\r\n") + 5)).toBe(
-      source.slice(bodyStart),
-    );
-  });
-
-  test("accepts missing metadata and rejects invalid managed metadata", () => {
-    expect(
-      parseKnowledgeOverviewDocument("# Existing\n").managed,
-    ).toBeUndefined();
-    expect(() =>
-      parseKnowledgeOverviewDocument(`---
-aiongside:
-  schema: 1
-  key: Invalid Key
-  contentDigest: ${"a".repeat(64)}
----
-
-# Existing
-`),
-    ).toThrow("Invalid aiongside Knowledge metadata");
+      "[target]: nested/doc.md",
+      "",
+      "`[code](inline.md)`",
+      "~~~md",
+      "[code](fenced.md)",
+      "~~~",
+      "<!-- [hidden](comment.md) -->",
+      '<a href="html.md">HTML</a>',
+    ].join("\n");
+    expect(markdownLinks(source)).toEqual([
+      { href: "file.md", image: false },
+      { href: "two words.md", image: false },
+      { href: "pic.png", image: true },
+      { href: "nested/doc.md", image: false },
+    ]);
   });
 });
 
-describe("Knowledge Registry", () => {
-  test("parses current and legacy tables while preserving user content", () => {
-    const current = parseKnowledgeRegistry(`# Knowledge registry
-
-User introduction.
-
-| Key | Path | Parent | Display name |
-| --- | --- | --- | --- |
-| operations | operations | | Operations |
-| incident-response | operations/incident-response | operations | Incident \\| response |
-
-User notes.
-`);
-    const legacy = parseKnowledgeRegistry(`# Knowledge registry
-
-| Key | Display name |
-| --- | --- |
-| operations | Operations |
-`);
-
-    expect(current).toEqual({
-      format: "current",
-      entries: [
-        {
-          key: "operations",
-          path: "operations",
-          displayName: "Operations",
-          line: 7,
-        },
-        {
-          key: "incident-response",
-          path: "operations/incident-response",
-          parent: "operations",
-          displayName: "Incident | response",
-          line: 8,
-        },
-      ],
+describe("domain boundaries", () => {
+  test("keeps configuration independent from integration", () => {
+    const config = workspaceConfigSchema.parse({
+      schema: 1,
+      name: "Workspace",
+      idPrefix: "WORK",
     });
-    expect(legacy.entries[0]).toEqual({
-      key: "operations",
-      path: "operations",
-      displayName: "Operations",
-      line: 5,
-    });
-  });
-
-  test("rejects missing, duplicate, and malformed managed tables", () => {
-    expect(() => parseKnowledgeRegistry("# Knowledge registry\n")).toThrow(
-      "Missing Knowledge Registry table",
-    );
-    expect(() =>
-      parseKnowledgeRegistry(`| Key | Display name |
-| --- | --- |
-
-| Key | Display name |
-| --- | --- |
-`),
-    ).toThrow("exactly one managed table");
-    expect(() =>
-      parseKnowledgeRegistry(`| Key | Path | Parent | Display name |
-| --- | --- |
-`),
-    ).toThrow("Invalid Knowledge Registry separator");
-  });
-
-  test("validates keys, paths, parents, duplicates, and cycles", () => {
-    const entries =
-      parseKnowledgeRegistry(`| Key | Path | Parent | Display name |
-| --- | --- | --- | --- |
-| operations | operations | | Operations |
-| incident-response | operations/incident-response | operations | Incidents |
-`).entries;
-    expect(validateKnowledgeRegistryEntries(entries)).toEqual([]);
-
-    const invalid =
-      parseKnowledgeRegistry(`| Key | Path | Parent | Display name |
-| --- | --- | --- | --- |
-| Invalid | ../outside | missing | Invalid |
-| duplicate | same | duplicate | Duplicate |
-| duplicate | same | duplicate | |
-`).entries;
-    expect(validateKnowledgeRegistryEntries(invalid)).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ code: "AIO-KNOWLEDGE-KEY" }),
-        expect.objectContaining({ code: "AIO-KNOWLEDGE-PATH" }),
-        expect.objectContaining({ code: "AIO-KNOWLEDGE-PARENT" }),
-        expect.objectContaining({ code: "AIO-KNOWLEDGE-DISPLAY-NAME" }),
-      ]),
-    );
-
-    const cycle = parseKnowledgeRegistry(`| Key | Path | Parent | Display name |
-| --- | --- | --- | --- |
-| first | first/second | second | First |
-| second | first | first | Second |
-`).entries;
-    expect(validateKnowledgeRegistryEntries(cycle)).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          code: "AIO-KNOWLEDGE-PARENT",
-          message: expect.stringContaining("cycle"),
-        }),
-      ]),
-    );
-  });
-
-  test("renders only the managed table and upgrades legacy registries", () => {
-    const current =
-      "# Registry\r\n\r\nBefore.\r\n\r\n| Key | Path | Parent | Display name |\r\n| --- | --- | --- | --- |\r\n| first | first | | First |\r\n\r\nAfter.\r\n";
-    const entries = [
-      ...parseKnowledgeRegistry(current).entries,
-      {
-        key: "second",
-        path: "first/second",
-        parent: "first",
-        displayName: "Second | topic",
-        line: 8,
-      },
-    ];
-    expect(renderKnowledgeRegistry(current, entries)).toBe(
-      "# Registry\r\n\r\nBefore.\r\n\r\n| Key | Path | Parent | Display name |\r\n| --- | --- | --- | --- |\r\n| first | first |  | First |\r\n| second | first/second | first | Second \\| topic |\r\n\r\nAfter.\r\n",
-    );
-
-    const legacy =
-      "Intro\n\n| Key | Display name |\n| --- | --- |\n| first | First |\n\nNotes\n";
-    expect(
-      renderKnowledgeRegistry(legacy, parseKnowledgeRegistry(legacy).entries),
-    ).toBe(
-      "Intro\n\n| Key | Path | Parent | Display name |\n| --- | --- | --- | --- |\n| first | first |  | First |\n\nNotes\n",
-    );
-  });
-
-  test("plans Knowledge create, nested move, and discard impacts", () => {
-    const root = planKnowledgeCreate([], { key: "operations" });
-    expect(root.entry).toEqual(
-      expect.objectContaining({
-        key: "operations",
-        path: "operations",
-        displayName: "operations",
-      }),
-    );
-    const child = planKnowledgeCreate(root.entries, {
-      key: "incidents",
-      parent: "operations",
-      displayName: "Incidents",
-    });
-    expect(child.entry.path).toBe("operations/incidents");
-    expect(child.staleKeys).toEqual(["operations"]);
-    const leaf = planKnowledgeCreate(child.entries, {
-      key: "sev-one",
-      path: "operations/incidents/sev-one",
-      parent: "incidents",
-    });
-    const moved = planKnowledgeMove(leaf.entries, {
-      key: "incidents",
-      path: "reliability/incidents",
-      parent: null,
-    });
-    expect(moved.movedKeys).toEqual(["incidents", "sev-one"]);
-    expect(moved.entries.find((entry) => entry.key === "sev-one")?.path).toBe(
-      "reliability/incidents/sev-one",
-    );
-    expect(moved.staleKeys).toEqual(["incidents", "operations"]);
-    expect(
-      planKnowledgeDiscard(moved.entries, "incidents", ["WORK-2"]),
-    ).toEqual(
-      expect.objectContaining({
-        childKeys: ["sev-one"],
-        referencedBy: ["WORK-2"],
-      }),
-    );
-  });
-
-  test("rejects mutation conflicts with stable error codes", () => {
-    const entries = planKnowledgeCreate([], { key: "operations" }).entries;
-    expect(() => planKnowledgeCreate(entries, { key: "operations" })).toThrow(
-      expect.objectContaining({ code: "AIO-KNOWLEDGE-CREATE-CONFLICT" }),
-    );
-    expect(() =>
-      planKnowledgeMove(entries, {
-        key: "operations",
-        path: "operations/inside",
-      }),
-    ).toThrow(expect.objectContaining({ code: "AIO-KNOWLEDGE-MOVE-CONFLICT" }));
-    expect(() => planKnowledgeDiscard(entries, "missing")).toThrow(
-      expect.objectContaining({ code: "AIO-KNOWLEDGE-NOT-FOUND" }),
-    );
-    expect(() =>
-      planKnowledgeCreate(entries, {
-        key: "empty-name",
-        displayName: "   ",
-      }),
-    ).toThrow(expect.objectContaining({ code: "AIO-KNOWLEDGE-DISPLAY-NAME" }));
-  });
-});
-
-describe("workspace configuration", () => {
-  test("keeps the Agent Skill version optional for schema 1 workspaces", () => {
-    const legacy = { schema: 1, name: "Legacy", idPrefix: "AIO" };
-    const managed = { ...legacy, agentSkillVersion: 1 };
-
-    expect(workspaceConfigSchema.parse(legacy)).toEqual(legacy);
-    expect(workspaceConfigSchema.parse(managed)).toEqual(managed);
-    for (const invalid of [0, -1, 1.5, "1"]) {
-      expect(
-        workspaceConfigSchema.safeParse({
-          ...legacy,
-          agentSkillVersion: invalid,
-        }).success,
-      ).toBe(false);
-    }
-  });
-});
-
-describe("Agent Skill", () => {
-  test("validates the canonical managed skill", async () => {
-    const source = await readFile(
-      path.resolve(import.meta.dirname, "../../../skills/aiongside/SKILL.md"),
-      "utf8",
-    );
-    const skill = parseAgentSkill(source);
-
-    expect(skill).toEqual(
-      expect.objectContaining({
-        name: AGENT_SKILL_NAME,
-        description: expect.any(String),
-        license: "MIT",
-        version: CURRENT_AGENT_SKILL_VERSION,
-      }),
-    );
-    expect(source).toContain("aiongside work move");
-    expect(source).toContain("aiongside work knowledge add");
-    expect(source).toContain("aiongside work sync");
-    expect(source).toContain("aiongside check");
-  });
-
-  test("rejects invalid metadata and detects exact-byte drift", async () => {
-    const source = await readFile(
-      path.resolve(import.meta.dirname, "../../../skills/aiongside/SKILL.md"),
-      "utf8",
-    );
-    const crlf = source.replaceAll("\n", "\r\n");
-
-    expect(parseAgentSkill(crlf).version).toBe(CURRENT_AGENT_SKILL_VERSION);
-    expect(isExactAgentSkillSource(source, source)).toBe(true);
-    expect(isExactAgentSkillSource(crlf, source)).toBe(false);
-    expect(() =>
-      parseAgentSkill(source.replace("license: MIT", "license: Proprietary")),
-    ).toThrow("Invalid Agent Skill metadata");
-  });
-});
-
-describe("Agent integration", () => {
-  test("keeps managed instructions separate from user-owned rules", async () => {
-    const instructions = await readFile(
-      path.resolve(import.meta.dirname, "../../../instructions/aiongside.md"),
-      "utf8",
-    );
-    const rules = createRulesDocument();
-
-    expect(instructions).toContain("AIongside managed instructions");
-    expect(instructions).toContain("aiongside work move");
-    expect(instructions).toContain("Knowledge relationships");
-    expect(instructions).toContain("knowledgeReview");
-    expect(instructions).toContain("aiongside work sync");
-    expect(instructions).toContain("aiongside check");
-    expect(rules).toContain("workspace-specific instructions");
-    expect(rules).not.toContain("aiongside work move");
-  });
-
-  test("parses common hook events and rejects invalid input", () => {
-    expect(
-      parseAgentHookEvent(
-        JSON.stringify({
-          cwd: "/workspace",
-          hook_event_name: "Stop",
-          stop_hook_active: true,
-        }),
-        "Stop",
-      ),
-    ).toEqual(
-      expect.objectContaining({
-        cwd: "/workspace",
-        hook_event_name: "Stop",
-        stop_hook_active: true,
-      }),
-    );
-    expect(() => parseAgentHookEvent("not json", "Stop")).toThrow();
-    expect(() =>
-      parseAgentHookEvent(
-        JSON.stringify({ cwd: "/workspace", hook_event_name: "Stop" }),
-        "SessionStart",
-      ),
-    ).toThrow("Expected SessionStart");
-  });
-
-  test("renders session context and bounded stop decisions", () => {
-    expect(createSessionStartHookOutput("context")).toEqual({
-      hookSpecificOutput: {
-        hookEventName: "SessionStart",
-        additionalContext: "context",
-      },
-    });
-    const issue = {
-      code: "AIO-TEST",
-      path: "record.md",
-      message: "Invalid record",
-      hint: "Fix the record.",
-    };
-    expect(createStopHookOutput([], false)).toEqual({});
-    expect(createStopHookOutput([issue], false)).toEqual(
-      expect.objectContaining({ decision: "block" }),
-    );
-    expect(createStopHookOutput([issue], true)).toEqual(
-      expect.objectContaining({
-        systemMessage: expect.stringContaining("after one recovery turn"),
-      }),
-    );
+    expect(config).toEqual({ schema: 1, name: "Workspace", idPrefix: "WORK" });
+    expect(metadata).not.toHaveProperty("checks");
   });
 });
 

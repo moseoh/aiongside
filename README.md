@@ -1,301 +1,111 @@
 # AIongside
 
-A local-first workspace where people and AI share everyday work context, Records, Overviews, and rules.
-
-The first goal is simple local work management. The second goal is a validation layer that turns damaged Records, missed updates, and inconsistent generated Views into mechanical failures.
-
-## Status
-
-- MVP CLI implemented.
-- Workspace initialization, work item creation, status movement, dependency management, cancellation, safe discard, and validation implemented.
-- Editable workspace templates implemented.
-- Published on npm as `aiongside`.
-- TypeScript monorepo managed with Bun.
-- Project-local Agent Skills, managed instructions, and lifecycle Hooks installed and validated by the CLI.
-- Record-body freshness tracking for human-readable Overviews implemented.
-- Nested Knowledge lifecycle, topic creation, movement, recoverable discard, freshness validation, exploration, sync, and Work completion gates implemented.
-- Local Web UI reserved for the distant future.
-- TUI excluded from product scope.
+A local-first workspace for people and AI. The CLI owns metadata and mechanical checks; people and AI own document content and decisions.
 
 ## Quick start
 
-Install AIongside with Node.js 22 or later:
+Requires Node.js 22 or later. Bun is needed only for source development.
+
+Version 0.4.0 changes the workspace and Knowledge format. Workspaces from 0.3.x and earlier are not automatically migrated. Keep existing data backed up and initialize a new workspace for this format. `workspace upgrade` updates agent integration only; it does not migrate documents.
 
 ```sh
 npm install --global aiongside
-aiongside --help
 aiongside init ./example
-aiongside --root ./example check
+aiongside --root ./example work new "Book a venue"
+aiongside --root ./example work move WORK-1 done --json
+aiongside --root ./example check --json
 ```
 
-The installed CLI runs on Node.js without requiring Bun. Node.js 22 and 24 are tested for every release candidate.
-
-To run from source:
-
-```sh
-bun install
-bun run build
-node packages/cli/dist/bin.js init ./example
-node packages/cli/dist/bin.js --root ./example work new "First Work"
-node packages/cli/dist/bin.js --root ./example check
-```
-
-## CLI output
-
-The default output is designed for people. Commands use the same small status vocabulary: `✓` success, `•` information, `+` creation, `~` update, `!` warning, `×` error, and `→` next action. A successful initialization starts with the result, groups the created integration files, and ends with the next command:
-
-```text
-✓ Workspace initialized
-  • Root          /path/to/workspace
-  • ID prefix     WORK
-  + Agent Skills  .agents/skills/aiongside/SKILL.md · .claude/skills/aiongside/SKILL.md
-  + Instructions  .aiongside/instructions.md
-  + Hooks         .claude/settings.json · .codex/hooks.json
-! Approve project Hooks in Claude Code or Codex CLI when prompted. AIongside does not change user trust settings.
-→ Create your first work: aiongside --root "/path/to/workspace" work new "First Work"
-```
-
-Colors are used only in a terminal and never carry meaning by themselves. Pipes, captured output, and `NO_COLOR` receive the same text without ANSI codes. Automation should use documented `--json` output, Hook JSON, and exit codes instead of parsing human-readable prose. JSON output never includes headings, symbols, colors, or hints.
-
-## Agent integration
-
-Claude Code and Codex CLI are the official MVP agent integrations. Other products may discover the generic Agent Skill, but AIongside does not guarantee their Hook execution or full workflow compliance. Support for other agents is only a possible later scope.
-
-`aiongside init` installs the same managed Agent Skill in both supported project paths:
-
-```text
-.agents/skills/aiongside/SKILL.md
-.claude/skills/aiongside/SKILL.md
-```
-
-These files are generated from the skill included with the installed CLI. Do not edit them directly. Put workspace-specific instructions in `.aiongside/rules.md` and create separately named skills for unrelated procedures.
-
-The CLI also copies its always-on instructions to `.aiongside/instructions.md` and registers project-local `SessionStart` and `Stop` Hooks in `.claude/settings.json` and `.codex/hooks.json`. Session start injects the managed instructions and user rules without preloading all Work or Knowledge content. Session stop runs the same read-only validation as `aiongside check`; the first failure, including stale Knowledge, blocks completion and one retry reports remaining problems without blocking again.
-
-Claude Code or Codex CLI may ask you to approve project Hooks. Review and approve the two `aiongside hook` commands in the agent product. AIongside does not change user trust settings or user-home configuration. If `aiongside` is no longer on `PATH`, reinstall the global CLI; Hooks never install or update packages automatically.
-
-Use `aiongside skill sync` to restore the managed integration without a network connection. Use `aiongside update` to check npm, preview and approve a global CLI update, and then sync the current workspace with the newly installed CLI. Existing `AGENTS.md` and `CLAUDE.md` files are never created or modified. Older workspaces may retain an AIongside block previously added to either file; after approving the project Hooks, remove that old block manually if desired.
-
-See [MVP agent integration](docs/mvp.md) for the support and ownership boundaries.
-
-## Templates
-
-`aiongside init` creates editable Markdown templates:
-
-```text
-.aiongside/templates/
-  record.md
-  overview.md
-  plan.md
-```
-
-Edit these files with any text editor. New work items use the current workspace templates. AIongside generates YAML frontmatter separately, so template customization cannot remove machine-owned metadata.
-
-`record.md` and `overview.md` must retain the `{{title}}` placeholder. `aiongside check` reports missing template files and invalid placeholders. Initialization never overwrites an existing template file.
-
-## Workspace files
-
-```text
-work/<ID>/
-  record.md
-  overview.md
-  plan.md              # Created when the work item moves to active
-  references/
-  deliverables/
-  evidence/
-views/
-  open.md
-  closed.md
-knowledge/
-  registry.md
-  operations/                   # Registered key: operations
-    overview.md
-    incident-response/          # Registered key: incident-response
-      overview.md
-      ...                       # User-defined internal content
-```
-
-`record.md` is the canonical work document. It owns status, progress, decisions, and outcomes. `overview.md` is the short human-readable entry point and does not duplicate dynamic state. Its machine-owned `recordBodyDigest` records which Record Markdown body was last reviewed. `plan.md` is optional and is created when a work item moves to `active`.
-
-After editing a Record Markdown body, review the Overview and update its human-readable content when needed. Then record that review explicitly:
-
-```sh
-aiongside work sync WORK-1
-```
-
-`aiongside check` reports `AIO-OVERVIEW-STALE` when the digest is missing or no longer matches. Record frontmatter and LF/CRLF differences do not affect this digest. Sync never generates or approves Overview prose.
-
-New workspaces use `WORK` as the default ID prefix. IDs start at `WORK-1`, have no leading zero, and are sorted by their numeric suffix in generated Views. A custom prefix remains available through `aiongside init --prefix <prefix>`. Padded IDs such as `AIO-001` are not supported or migrated automatically; see [Unreleased changes](CHANGELOG.md).
-
-Each new work item includes three user-owned content directories:
-
-- `references/`: material received from outside the work, such as official documents, vendor replies, source files, and links.
-- `deliverables/`: outputs produced for delivery, such as reports, instructions, presentations, spreadsheets, and exports.
-- `evidence/`: results observed directly in the current environment, such as logs, query results, screenshots, measurements, and command output.
-
-AIongside requires these directories but does not constrain their file names, formats, or nested structure. Their contents are never rewritten automatically. File paths and exact bytes in all three directories are covered by the completion seal, so changing them while work remains `done` fails validation. Direct edits do not update Record metadata or generated Views.
-
-Older workspaces may contain `reports/` instead of `deliverables/` and may not contain `evidence/`. AIongside does not move or delete those files automatically. Review the existing content, move delivery outputs into a new `deliverables/` directory, and create `evidence/` before running further mutations.
-
-`knowledge/registry.md` is the entry point for persistent Knowledge shared across work items. Its managed table has `Key`, `Path`, `Parent`, and `Display name` columns. A key is a stable, globally unique relationship identifier. A path locates the topic below `knowledge/`, an optional parent names another registered key, and the display name is for people. New workspaces start with an empty Registry and no default Knowledge keys.
-
-Registered topics can use paths at any depth and each registered path must contain `overview.md`. Explore only what the current task needs:
-
-```sh
-aiongside knowledge list
-aiongside knowledge tree
-aiongside knowledge show incident-response
-```
-
-Create a new topic, or register an existing unregistered directory with the same command:
-
-```sh
-aiongside knowledge new operations --display-name "Operations"
-aiongside knowledge new incident-response --parent operations
-aiongside knowledge new handbook --path company/handbook
-```
-
-A new empty path receives a minimal English Overview and starts fresh. Existing files are preserved byte-for-byte. An existing Overview is never rewritten; a missing Overview receives only a minimal heading. Adopted content remains stale until a person reviews it and runs `knowledge sync`.
-
-Moving a topic preserves its key, Work relationships, nested registered paths, and all user content. Preview first because Markdown links are reported but never rewritten:
-
-```sh
-aiongside knowledge move incident-response \
-  --path reliability/incident-response \
-  --no-parent \
-  --dry-run --json
-aiongside knowledge move incident-response \
-  --path reliability/incident-response \
-  --no-parent
-```
-
-Discard is limited to a leaf topic with no Work references. It removes the Registry row and moves the directory plus recovery metadata under `.aiongside/trash/knowledge/`; restoration remains manual:
-
-```sh
-aiongside knowledge discard incident-response --dry-run
-aiongside knowledge discard incident-response --confirm incident-response
-```
-
-Each Overview stores machine-owned freshness metadata under one namespace while preserving its Markdown body and other frontmatter:
-
-```yaml
-aiongside:
-  schema: 1
-  key: incident-response
-  contentDigest: <sha256>
-```
-
-A topic owns the content below its registered path except its own Overview and every physically nested registered topic. Unregistered files and directories belong to the nearest registered topic. A nested topic's content changes only its own digest. Changes to a direct child's Registry tuple make only its parent stale so the parent routing can be reviewed.
-
-Markdown line endings are normalized for the digest. Other files use exact bytes. Symlinks contribute their path and target string without being followed. AIongside does not impose names, formats, or internal structure and does not rewrite shared Knowledge automatically. Shared Knowledge is outside individual work completion seals.
-
-After changing owned content, review the Overview and update its scope or navigation when needed. Record that review explicitly:
-
-```sh
-aiongside knowledge sync incident-response
-```
-
-Sync updates only the managed metadata. It never writes Overview prose and must not be run automatically without review. Missing or mismatched metadata and changed owned content produce `AIO-KNOWLEDGE-STALE`. Existing Overviews without metadata remain unchanged and stale until their first explicit sync.
-
-The legacy two-column `Key` and `Display name` table remains readable: each key resolves to the same top-level path with no parent. AIongside does not rewrite an existing Registry automatically. Once a legacy row is present, its `knowledge/<key>/overview.md` entry point must exist.
-
-Work Records store related Knowledge keys rather than paths, so a registered path can move without breaking Work relationships. Use the most specific registered key and do not add its parents automatically:
-
-```sh
-aiongside work knowledge add WORK-1 incident-response
-aiongside work knowledge remove WORK-1 incident-response
-```
-
-The `done` dry-run returns a `knowledgeReview` object with each target's current path, Overview, and freshness. When it lists targets, review each target Overview and update only the smallest relevant internal documents. Update an Overview only when its scope or navigation changed, then sync it. Stale linked topics block `done`; unrelated stale topics do not. When there are no targets, explicitly confirm that the work has no lasting Knowledge impact. Then record the existing `knowledge` confirmation before moving to `done`. Reopening preserves the candidate keys but resets that confirmation for the next completion cycle. Later Knowledge changes do not invalidate historical Work completion seals.
-
-Views are generated from Record metadata and must not be edited directly. `aiongside check` compares each View with a deterministic rendering of current Records. Missing, stale, manually modified, or line-ending-converted Views fail validation without changing files. Run `aiongside view rebuild` for explicit recovery.
-
-## Work status
-
-AIongside uses five statuses:
-
-- `inbox`: captured but not currently being worked.
-- `active`: work, review, or verification that can proceed now.
-- `waiting`: no action can proceed until an external response or condition changes.
-- `done`: completion requirements were reviewed and sealed.
-- `cancelled`: intentionally stopped while retaining the Record.
-
-Every status can move to every other status. Preview a move before applying it:
-
-```sh
-aiongside work move WORK-1 waiting --dry-run --json
-aiongside work move WORK-1 waiting \
-  --waiting-reason "Waiting for approval" \
-  --resume-when "Approval is received"
-```
-
-The JSON preview lists stable `requiredInputs`, questions, CLI options, changes, and warnings. Transition answers are written to machine-owned Record frontmatter, not the customizable template body.
-
-Moving to `done` validates review signals stored in Record frontmatter. Confirm them after reviewing the corresponding Record content:
-
-```sh
-aiongside work confirm WORK-1 scope completion
-aiongside work confirm WORK-1 verification
-aiongside work confirm WORK-1 outcome knowledge
-```
-
-- Only `done` requires `scope`, `completion`, `verification`, `outcome`, and `knowledge`.
-- Only `done` requires every ID in `needs` to be `done`.
-- Leaving `done` requires `--reopen-reason` or `--cancellation-reason`, invalidates the completion seal, and resets verification, outcome, and knowledge confirmations.
-- Changing completion-relevant content while the status remains `done` fails `aiongside check`.
-
-`needs` contains stable work item IDs in Record frontmatter. Manage it through the CLI instead of editing frontmatter directly:
-
-```sh
-aiongside work needs add WORK-2 WORK-1
-aiongside work needs remove WORK-2 WORK-1
-```
-
-Adding a dependency rejects missing, duplicate, self-referencing, and cyclic relationships. Removing an absent relationship succeeds without changing files. Reopen `done` work before changing its dependencies. Confirmations are mechanical review signals; they do not prove that prose is true or complete.
-
-`knowledge` contains stable Registry keys in Record frontmatter. Manage it through `work knowledge add/remove` instead of editing frontmatter directly. Adding or removing a relationship resets the Knowledge confirmation. Reopen `done` work before changing these relationships.
+An actual move to done tells AI to read the Work Record and deliverables, follow relevant Knowledge index links, and compare their content. Incorporate reusable additions or corrections first. Repair affected indexes and internal links when paths change. Then use `work knowledge add` to record the contribution if the relationship is absent. If no update is needed, do nothing; do not add reference-only documents. There is no review status, approval, or review-closing command.
 
 ## Commands
 
+- Workspace: `init`, `update`, `context`, `check`, `doctor`, `workspace upgrade`.
+- Work: `work new`, `move`, `sync`, `discard`, `needs add/remove`, `knowledge add/remove`.
+- Knowledge: `knowledge new`, `move`, `discard`, `list`, `tree`, `show`.
+- Views: `view sync`.
+
+Use command-specific `--help` for options. Work statuses are inbox, active, waiting, done, and cancelled. Waiting, reopening, and cancellation require their documented reason options. Done requires valid mechanical state and completed dependencies, not body checkboxes or confirmations.
+
+Work Knowledge links record that a completed Work's results were incorporated into Knowledge. They survive reopening and are excluded from the completion seal. Do not record documents that were only consulted or are awaiting an update. The CLI records the assertion without checking content meaning or command order. Knowledge can also be created and updated independently of Work.
+
+Discard commands preview affected files and references with `--dry-run`, then require the exact identifier through `--confirm`. Discard moves content into recoverable workspace trash.
+
+## Documents and templates
+
 ```text
-aiongside init
-aiongside update
-aiongside skill sync
-aiongside hook session-start
-aiongside hook stop
-aiongside work new <title>
-aiongside work confirm <id> <checks...>
-aiongside work sync <id>
-aiongside work move <id> <status> --dry-run --json
-aiongside work move <id> <status> [transition options]
-aiongside work needs add <id> <dependency-id>
-aiongside work needs remove <id> <dependency-id>
-aiongside work knowledge add <id> <key>
-aiongside work knowledge remove <id> <key>
-aiongside knowledge new <key> [--display-name <name>] [--path <path>] [--parent <key>] [--json]
-aiongside knowledge move <key> --path <path> [--parent <key> | --no-parent] [--dry-run] [--json]
-aiongside knowledge discard <key> [--dry-run | --confirm <key>] [--json]
-aiongside knowledge list [--json]
-aiongside knowledge tree [--json]
-aiongside knowledge show <key> [--json]
-aiongside knowledge sync <key> [--json]
-aiongside work cancel <id> --cancellation-reason <text>
-aiongside work discard <id> --dry-run
-aiongside view rebuild
-aiongside check
+.aiongside/
+  config.yaml
+  instructions.md
+  templates/{record,overview,plan}.md
+  internal/
+    integration.json
+    update-preferences.json
+    staging/
+    trash/
+work/<ID>/
+  record.md
+  overview.md
+  plan.md
+  references/
+  deliverables/
+  evidence/
+knowledge/
+  index.md
+  policy.md
+  events/
+    index.md
+    venue-selection.md
+views/{open,closed}.md
 ```
+
+File roles and default names are fixed. Templates control body text, headings, language, and layout. The optional `{{title}}` placeholder is expanded; other placeholders remain literal. No sections or checkboxes are required. Editing a template does not rewrite existing documents. A missing template affects only operations that need to create that document. The plan is created when Work first becomes active.
+
+The CLI writes Work frontmatter, transition history, completion seals, initial Knowledge keys, and generated Views. Edit document bodies directly. Reopen done Work before changing sealed content, including links to moved Knowledge. The seal includes Record body and Work supporting content, not Overview, shared Knowledge, or Knowledge relationships.
+
+Knowledge consists of individual Markdown documents. Every document except `index.md` requires `aiongside: { schema: 1, key: unique-key }` in YAML frontmatter; optional `aiongside.title` supplies a display name. Keys are globally unique and remain stable when files move. CLI commands scan files to resolve current paths; no Registry is stored.
+
+Each folder, including `knowledge/`, has an `index.md` with descriptions and Markdown links to its direct files and folders, excluding itself. A folder link or its index link covers that folder. Attachments need routing links but no key. Knowledge body text belongs in documents, not indexes. Filenames and classification folders are customizable.
+
+`knowledge new <key> [--path folder/file.md]` defaults to `<key>.md`. It creates missing parent folders and blank indexes without rewriting existing routing. `knowledge move <key> --path folder/file.md` moves only the document and preserves its key. Results identify affected indexes and old/new paths for AI to repair incoming links and the moved document's relative links. Neither command rewrites existing document bodies. There is no Knowledge Overview, hash, or sync command.
+
+## Mechanical checks
+
+`check --json` reads Work hashes, structure, metadata, identifiers, references, dependencies, completion seals, and generated Views. It recursively checks Knowledge keys, index coverage, and Work/Knowledge local Markdown links. It does not judge whether work is meaningful, approved, complete in prose, or awaiting an answer. It does not inspect templates or agent integration.
+
+When a stored Work hash differs or is missing, each issue explains the reason and identifies the Record and Overview paths. Compare those documents, update the Overview if needed, then run `work sync <ID>`. If the Overview body is still accurate, leave it unchanged and sync after comparison. Sync records a hash; it does not approve content.
+
+Work sync validates the configuration and the selected Record/Overview paths, schemas, and identity, then updates only the stored body hash. Other workspace errors do not block this operation. Check continues to report unresolved state, dependency, seal, and document issues. Sync does not change Work state, completion seals, document bodies, or Views.
+
+Index and link issues identify missing entries or targets and ask AI to repair them, then run `check --json`. Inline and reference Markdown links and images are checked; code, comments, frontmatter, HTML links, external URLs, outside-workspace paths, and fragment meaning are excluded. Symlinks inside the workspace are rejected without following them. Routing errors remain visible in check and Stop but do not prevent mutations needed for repair. Duplicate or invalid keys block mutations.
+
+`context --json` reads only managed instructions and returns `version`, `root`, `ok`, `instructions`, and `issues`. It does not create, load, or return a separate rules file. User instructions stay in the agent's own instruction files. `doctor --json` checks integration independently. Check and doctor return `version`, `root`, `ok`, and `issues`; each issue has `code`, `path`, `message`, and an optional `hint`. Exit codes: 0 success, 1 reported problems, 2 execution failure. JSON is one stdout object; human output remains separate.
+
+## Agent integration
+
+Initialization installs minimal instructions and project SessionStart/Stop settings for Claude Code and Codex. No Skill or plugin is installed.
+
+The separate `aiongside-agent-adapter` executable calls the installed ordinary CLI with `context --json` or `check --json`. It translates responses without adding domain rules. Stop blocks the first mechanical failure, preserves its complete reason and recovery steps, and reports unresolved issues without repeatedly blocking.
+
+Approve project hooks in the agent product when prompted. AIongside does not edit trust settings. `workspace upgrade` repairs managed instructions, hooks, and integration version offline; it preserves AGENTS.md, CLAUDE.md, and unrelated files and settings. `update` works from any directory and updates only the global CLI after approval. It never upgrades workspaces automatically. Running `init` again is rejected. Legacy workspace files are not automatically moved or deleted.
+
+SessionStart checks npm for a new CLI release with a two-second limit and a one-hour cache. It separately compares local integration versions. Lookup failures do not block session startup. Stop and ordinary `context` do not check npm or write update settings.
+
+After the user explicitly declines further notices for a version, run `aiongside update --skip-version <release>` for all workspaces, or `aiongside workspace upgrade --skip-version <integration-version>` for this workspace. Silence and postponing one session do not count as version refusals. New versions are announced again; explicit updates remain available.
+
+User preferences default to `~/.config/aiongside/update-preferences.json`; the lookup cache defaults to `~/.cache/aiongside/update-check.json`. `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` override their base directories. Project preferences are stored in `.aiongside/internal/update-preferences.json` and do not change integration metadata.
+
+Knowledge move and Work Knowledge add/remove return matching result meanings in text and `--json`. Add reports the contribution record and unchanged Knowledge content, with no new update or sync action. Remove preserves Knowledge content and asks AI to show the contributed content and impact and obtain user approval before removing it. Relationships do not identify individual source sentences. The CLI never tracks whether these actions or approvals happened.
+
+See [integration boundaries](docs/mvp.md).
 
 ## Development
 
 ```sh
+bun install
+bun run build
 bun run check
 bun run package:check
 ```
 
-Node.js 22 and 24 are supported. Development uses Node.js 24.
-
-Publishing requires an npm owner for `aiongside` and an npm Trusted Publisher restricted to `moseoh/aiongside` and `.github/workflows/publish.yml`. A published GitHub Release must use a tag that exactly matches `v<package-version>`. The release workflow rejects version mismatches, existing npm versions, package validation failures, and Node.js 22 or 24 smoke-test failures before publishing.
-
-## License
-
-[MIT](LICENSE)
+CI runs Node.js 22 and 24 package checks. Local verification limitations are recorded separately; publishing is not part of implementation validation.

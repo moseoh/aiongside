@@ -1,60 +1,36 @@
-# MVP agent integration
+# Agent integration boundaries
 
-## Official support
+## Ownership
 
-AIongside officially supports Claude Code and Codex CLI for the MVP. Both integrations use project-local Agent Skills and lifecycle Hooks installed by the CLI.
+- Domain: Work state, relationships, hashes, completion seals, and deterministic Views.
+- Filesystem: safe reads, transactional writes, workspace layout, and recovery.
+- CLI: ordinary commands, human output, versioned JSON, and recovery guidance.
+- Managed instructions: CLI usage, help, command results, document and folder roles, and local writing hints.
+- Adapter: product events, ordinary CLI invocation, response conversion, and bounded Stop retries.
 
-Other Agent Skills-compatible products may find `.agents/skills/aiongside/SKILL.md`. This does not guarantee that their sessions load the always-on instructions, run the final workspace check, or follow the complete workflow. Additional agent support is uncommitted later scope.
+AIongside does not distribute an agent Skill. The CLI does not judge document meaning, template conformance, Knowledge impact, approvals, or whether an agent is waiting for the user.
 
-## Managed and user-owned files
+## Product hooks
 
-AIongside manages these files as one versioned integration bundle:
+Both supported products use project SessionStart and Stop command hooks. SessionStart reads context only. Stop calls check and forwards every issue without shortening its recovery steps to a sync command.
 
-```text
-.agents/skills/aiongside/SKILL.md
-.claude/skills/aiongside/SKILL.md
-.aiongside/instructions.md
-.claude/settings.json       # AIongside Hook entries only
-.codex/hooks.json           # AIongside Hook entries only
-.aiongside/config.yaml      # Managed bundle version only
-```
+Official protocol references:
 
-AIongside preserves unrelated keys and Hook entries in the two JSON settings files. It also preserves these user-owned files:
+- [Codex hooks](https://learn.chatgpt.com/docs/hooks).
+- [Claude Code hooks](https://code.claude.com/docs/en/hooks).
 
-```text
-.aiongside/rules.md
-AGENTS.md
-CLAUDE.md
-```
+The adapter accepts the shared event fields, ignores additional product fields, and uses the documented SessionStart context and Stop decision envelopes. A retry signaled by `stop_hook_active` reports unresolved issues without another block. CLI absence, timeout, malformed output, or inconsistent exit status is an execution failure, not a passed check.
 
-Write workspace-specific rules only in `.aiongside/rules.md`. Run `aiongside skill sync` to restore managed files from the installed CLI without network access.
+## Installation
 
-## Lifecycle Hooks
+The npm package contains ordinary CLI and adapter executables plus managed instructions. Initialization writes project hook settings and `.aiongside/internal/integration.json`. Integration synchronization preflights conflicts and future versions before changing files, preserves unrelated hooks and settings, and rolls back failed managed writes.
 
-The installed settings register two commands:
+The workspace root configuration, managed instructions, and editable templates remain directly under `.aiongside/`. Integration metadata, project notification preferences, staging, and recoverable trash live under `.aiongside/internal/`. Separate rules files are not created or loaded; existing user files are not automatically migrated or deleted.
 
-```text
-aiongside hook session-start
-aiongside hook stop
-```
+Agent trust approval remains user-owned. SessionStart may check npm within two seconds and store a one-hour result cache under the user's cache directory. It reads version-specific user/project notification preferences but never records refusals automatically. Lookup failures do not block instruction loading. Stop remains offline and read-only. No hook installs packages, upgrades a workspace, or modifies trust settings.
 
-`SessionStart` injects `.aiongside/instructions.md` and `.aiongside/rules.md`. It does not preload every work Record or supporting file.
+## Work completion
 
-`Stop` runs the same read-only workspace validation as `aiongside check`. A first failure blocks the agent response and returns every issue. A retry marked by the agent as an active Stop Hook reports remaining issues without blocking again.
+An actual move to done saves state, history, seal, and Views before returning one-time Knowledge guidance: read the Work Record and deliverables, follow relevant index paths and compare Knowledge, incorporate reusable results, repair affected indexes and links, then record the contribution with add if absent. Reference-only documents are excluded. A dry-run, failed move, or no-op does not create this guidance. No update means no follow-up command. Add records prior incorporation without issuing another content update or checking semantic evidence or command order. Remove retains content and requests user approval before any content removal.
 
-After changing a work Record Markdown body, the managed instructions require the agent to compare and update the human-readable Overview, then run `aiongside work sync <ID>`. Sync records the reviewed Record body digest and does not generate Overview content. A stale or missing digest fails the final check.
-
-Review and approve the project Hooks when Claude Code or Codex CLI prompts for trust. AIongside does not edit agent trust stores, user-home configuration, or global agent settings. Hooks do not access npm, install packages, update the CLI, or invoke an agent CLI.
-
-## Existing workspaces
-
-Install the current CLI, enter the workspace, and run:
-
-```sh
-aiongside skill sync
-aiongside check
-```
-
-Earlier AIongside versions may have appended a rules reference to `AGENTS.md` or `CLAUDE.md`. The current CLI leaves that user-owned text unchanged. After the new project Hooks are approved, remove the old AIongside block manually if it is redundant.
-
-The current work ID grammar uses an unpadded positive integer, such as `WORK-1`. Padded IDs such as `AIO-001` are not accepted or migrated automatically. Reinitialize pre-release workspaces or migrate their directories, Record metadata, Overview metadata, dependencies, and generated Views together before running mutations.
+Knowledge keys live in individual Markdown frontmatter. The CLI scans keys and paths, not a Registry. Folders are classification only; each index links direct children. Check validates coverage and internal links recursively, not their meaning. Move preserves keys and bytes and reports old/new paths. AI repairs links; done Work content still requires reopening. Knowledge has no Overview/hash/sync; Work hashes and sync remain.

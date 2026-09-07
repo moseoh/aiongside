@@ -14,7 +14,12 @@ import { afterEach, describe, expect, test } from "vitest";
 
 const execFileAsync = promisify(execFile);
 const roots: string[] = [];
+const adapterBin = path.resolve(
+  import.meta.dirname,
+  "../dist/agent-adapter.js",
+);
 const bin = path.resolve(import.meta.dirname, "../dist/bin.js");
+const runtime = process.env.AIONGSIDE_TEST_RUNTIME ?? process.execPath;
 
 afterEach(async () => {
   await Promise.all(
@@ -28,43 +33,53 @@ async function tempRoot(): Promise<string> {
   return root;
 }
 
-async function registerKnowledge(root: string, sync = true): Promise<void> {
-  const knowledgePath = path.join(
+async function registerKnowledge(root: string, routed = true): Promise<void> {
+  await cli([
+    "--root",
     root,
     "knowledge",
-    "operations",
+    "new",
     "incident-response",
-  );
-  await mkdir(knowledgePath, { recursive: true });
-  await writeFile(
-    path.join(knowledgePath, "overview.md"),
-    "# Incident response\n",
-  );
-  await writeFile(
-    path.join(root, "knowledge", "registry.md"),
-    `# Knowledge registry
-
-| Key | Path | Parent | Display name |
-| --- | --- | --- | --- |
-| incident-response | operations/incident-response | | Incident response |
-`,
-  );
-  if (sync) {
-    await cli(["--root", root, "knowledge", "sync", "incident-response"]);
+    "--path",
+    "operations/incident-response.md",
+    "--display-name",
+    "Incident response",
+  ]);
+  if (routed) {
+    await writeFile(
+      path.join(root, "knowledge/index.md"),
+      "[Operations](operations/)\n",
+    );
+    await writeFile(
+      path.join(root, "knowledge/operations/index.md"),
+      "[Incidents](incident-response.md)\n",
+    );
   }
 }
 
 async function cli(args: string[], input?: string) {
+  const userRoot = await tempRoot();
+  await mkdir(path.join(userRoot, "cache", "aiongside"), { recursive: true });
+  await writeFile(
+    path.join(userRoot, "cache", "aiongside", "update-check.json"),
+    JSON.stringify({ schema: 1, version: "0.0.0", checkedAt: Date.now() }),
+  );
+  const env = {
+    ...process.env,
+    XDG_CONFIG_HOME: path.join(userRoot, "config"),
+    XDG_CACHE_HOME: path.join(userRoot, "cache"),
+  };
   if (input === undefined) {
-    return execFileAsync(process.execPath, [bin, ...args], {
+    return execFileAsync(runtime, [bin, ...args], {
       encoding: "utf8",
+      env,
     });
   }
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
     const child = execFile(
-      process.execPath,
-      [bin, ...args],
-      { encoding: "utf8" },
+      runtime,
+      [adapterBin, ...args],
+      { encoding: "utf8", env },
       (error, stdout, stderr) => {
         if (error) {
           reject(Object.assign(error, { stdout, stderr }));
@@ -78,6 +93,77 @@ async function cli(args: string[], input?: string) {
 }
 
 describe("CLI", () => {
+  test("returns versioned context, check and doctor JSON with 0, 1 and 2 exits", async () => {
+    const root = await tempRoot();
+    for (const command of ["context", "check", "doctor"]) {
+      const failed = await cli(["--root", root, command, "--json"]).catch(
+        (error) => error,
+      );
+      expect(failed.code).toBe(2);
+      expect(failed.stderr).toBe("");
+      expect(JSON.parse(failed.stdout)).toMatchObject({
+        version: 1,
+        ok: false,
+      });
+    }
+    await cli(["init", root]);
+    expect(
+      JSON.parse((await cli(["--root", root, "context", "--json"])).stdout),
+    ).toMatchObject({
+      version: 1,
+      root,
+      ok: true,
+      instructions: expect.any(String),
+      issues: [],
+    });
+    await writeFile(path.join(root, ".aiongside/instructions.md"), "# Drift\n");
+    const doctor = await cli(["--root", root, "doctor", "--json"]).catch(
+      (error) => error,
+    );
+    expect(doctor.code).toBe(1);
+    expect(JSON.parse(doctor.stdout).issues[0].code).toBe(
+      "AIO-INSTRUCTIONS-DRIFT",
+    );
+    expect(
+      JSON.parse((await cli(["--root", root, "check", "--json"])).stdout).ok,
+    ).toBe(true);
+  });
+
+  test("forwards Work hash reasons and conditional update guidance to Stop unchanged", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    await cli(["--root", root, "work", "new", "Hash reason"]);
+    const recordPath = path.join(root, "work/WORK-1/record.md");
+    await writeFile(
+      recordPath,
+      `${await readFile(recordPath, "utf8")}\nChanged content.\n`,
+    );
+    const checked = await cli(["--root", root, "check", "--json"]).catch(
+      (error) => error,
+    );
+    const issue = JSON.parse(checked.stdout).issues.find(
+      (item: { code: string }) => item.code === "AIO-OVERVIEW-STALE",
+    );
+    expect(issue.message).toContain("does not match");
+    expect(issue.hint).toContain("otherwise leave its body unchanged");
+    expect(issue.hint).toContain("work/WORK-1/record.md");
+    expect(issue.hint).toContain("work/WORK-1/overview.md");
+    const stop = JSON.parse(
+      (
+        await cli(
+          ["stop"],
+          JSON.stringify({ cwd: root, hook_event_name: "Stop" }),
+        )
+      ).stdout,
+    );
+    expect(stop.reason).toContain(issue.message);
+    expect(stop.reason).toContain(issue.hint);
+    await cli(["--root", root, "work", "sync", "WORK-1"]);
+    expect(
+      JSON.parse((await cli(["--root", root, "check", "--json"])).stdout).ok,
+    ).toBe(true);
+  });
+
   test("reports the package version", async () => {
     const manifest = JSON.parse(
       await readFile(
@@ -89,16 +175,18 @@ describe("CLI", () => {
     expect((await cli(["--version"])).stdout).toBe(`${manifest.version}\n`);
   });
 
-  test("documents update and rejects it outside a workspace before network access", async () => {
+  test("documents global update and accepts version refusal outside a workspace", async () => {
     const root = await tempRoot();
     const help = await cli(["update", "--help"]);
     expect(help.stdout).toContain("--yes");
-    expect(help.stdout).toContain("current workspace agent integration");
+    expect(help.stdout).toContain("global CLI from any directory");
 
-    await expect(cli(["--root", root, "update"])).rejects.toMatchObject({
-      code: 2,
-      stderr: expect.stringContaining("AIO-WORKSPACE-NOT-FOUND"),
-    });
+    expect(
+      (await cli(["--root", root, "update", "--skip-version", "0.9.0"])).stdout,
+    ).toContain("No installation performed");
+    await expect(
+      cli(["update", "--yes", "--skip-version", "0.9.0"]),
+    ).rejects.toMatchObject({ code: 2 });
   });
 
   test("runs initialization, creation, movement, and validation", async () => {
@@ -106,15 +194,6 @@ describe("CLI", () => {
 
     const initialized = await cli(["init", root, "--name", "Workspace"]);
     const created = await cli(["--root", root, "work", "new", "First Work"]);
-    const confirmed = await cli([
-      "--root",
-      root,
-      "work",
-      "confirm",
-      "WORK-1",
-      "scope",
-      "completion",
-    ]);
     const moved = await cli([
       "--root",
       root,
@@ -126,16 +205,15 @@ describe("CLI", () => {
     const checked = await cli(["--root", root, "check"]);
 
     expect(initialized.stdout).toContain("✓ Workspace initialized");
-    expect(initialized.stdout).toContain(`• Root          ${root}`);
-    expect(initialized.stdout).toContain("• ID prefix     WORK");
-    expect(initialized.stdout).toContain("+ Agent Skills");
+    expect(initialized.stdout).toContain(root);
+    expect(initialized.stdout).toContain("ID prefix");
+    expect(initialized.stdout).not.toContain("Agent Skills");
     expect(initialized.stdout).toContain("+ Instructions");
     expect(initialized.stdout).toContain("+ Hooks");
     expect(initialized.stdout).toContain("! Approve project Hooks");
     expect(initialized.stdout).toContain("→ Create your first work:");
     expect(initialized.stdout).not.toContain("\u001b[");
     expect(created.stdout).toContain("WORK-1 — First Work");
-    expect(confirmed.stdout).toContain("WORK-1 — scope, completion");
     expect(moved.stdout).toContain("WORK-1 — inbox → active");
     expect(checked.stdout).toBe("✓ Check passed\n");
   });
@@ -172,10 +250,12 @@ describe("CLI", () => {
     const unchanged = await cli(["--root", root, "work", "sync", "work-1"]);
 
     expect(help.stdout).toContain("sync");
-    expect(syncHelp.stdout).toContain("Overview review");
-    expect(synced.stdout).toBe("✓ Synced WORK-1 — work/WORK-1/overview.md\n");
+    expect(syncHelp.stdout).toContain("Record body hash");
+    expect(synced.stdout).toBe(
+      "✓ Recorded current Record body hash for WORK-1 — work/WORK-1/overview.md; Overview body unchanged\n",
+    );
     expect(unchanged.stdout).toBe(
-      "✓ Overview is current for WORK-1 — work/WORK-1/overview.md\n",
+      "✓ Record body hash already matches for WORK-1 — work/WORK-1/overview.md; no files changed\n",
     );
     expect((await cli(["--root", root, "check"])).stdout).toBe(
       "✓ Check passed\n",
@@ -186,6 +266,47 @@ describe("CLI", () => {
       code: 2,
       stderr: expect.stringContaining("AIO-WORK-NOT-FOUND"),
     });
+  });
+
+  test("sync succeeds during dependency recovery while check keeps reporting the error", async () => {
+    const root = await tempRoot();
+    const run = (...args: string[]) => cli(["--root", root, ...args]);
+    await cli(["init", root]);
+    await run("work", "new", "Venue");
+    await run("work", "new", "Preparation");
+    await run("work", "needs", "add", "WORK-2", "WORK-1");
+    await run("work", "move", "WORK-1", "done");
+    await run("work", "move", "WORK-2", "done");
+    await run(
+      "work",
+      "move",
+      "WORK-1",
+      "active",
+      "--reopen-reason",
+      "Recheck venue",
+    );
+    const recordPath = path.join(root, "work/WORK-1/record.md");
+    await writeFile(
+      recordPath,
+      `${await readFile(recordPath, "utf8")}Rechecking availability.\n`,
+    );
+    const sync = await run("work", "sync", "WORK-1");
+    expect(sync.stdout).toContain("Recorded current Record body hash");
+    const checked = await run("check", "--json").catch((error) => error);
+    expect(checked.code).toBe(1);
+    expect(JSON.parse(checked.stdout)).toMatchObject({
+      ok: false,
+      issues: [expect.objectContaining({ code: "AIO-DEPENDENCY-BLOCKED" })],
+    });
+    await run(
+      "work",
+      "move",
+      "WORK-2",
+      "active",
+      "--reopen-reason",
+      "Review preparation",
+    );
+    expect(JSON.parse((await run("check", "--json")).stdout).ok).toBe(true);
   });
 
   test("documents nested dependency commands", async () => {
@@ -210,382 +331,113 @@ describe("CLI", () => {
     expect(removeHelp.stdout).toContain("<id> <key>");
   });
 
-  test("lists, trees, shows, and syncs Knowledge in human and JSON formats", async () => {
+  test("creates, scans, moves, and discards documents with routing guidance", async () => {
     const root = await tempRoot();
     await cli(["init", root]);
-    const help = await cli(["knowledge", "--help"]);
-    for (const command of [
-      "new",
-      "move",
-      "discard",
-      "list",
-      "tree",
-      "show",
-      "sync",
-    ]) {
-      expect(help.stdout).toContain(command);
-    }
-    expect((await cli(["--root", root, "knowledge", "list"])).stdout).toBe(
-      "• No Knowledge registered\n",
-    );
-
-    await registerKnowledge(root, false);
-    const list = await cli(["--root", root, "knowledge", "list"]);
-    expect(list.stdout).toContain("incident-response");
-    expect(list.stdout).toContain("stale");
-    const listJson = JSON.parse(
-      (await cli(["--root", root, "knowledge", "list", "--json"])).stdout,
-    ) as Array<{ key: string; fresh: boolean }>;
-    expect(listJson).toEqual([
-      expect.objectContaining({ key: "incident-response", fresh: false }),
+    const run = async (...args: string[]) =>
+      JSON.parse(
+        (await cli(["--root", root, "knowledge", ...args, "--json"])).stdout,
+      );
+    const created = await run("new", "policy", "--path", "company/policy.md");
+    expect(created.path).toBe("company/policy.md");
+    expect(created.postActions[0].paths).toEqual([
+      "knowledge/index.md",
+      "knowledge/company/index.md",
     ]);
-
-    const synced = await cli([
-      "--root",
-      root,
-      "knowledge",
-      "sync",
-      "incident-response",
-      "--json",
-    ]);
-    expect(JSON.parse(synced.stdout)).toEqual(
-      expect.objectContaining({
-        key: "incident-response",
-        changed: true,
-        fresh: true,
-      }),
+    expect((await run("list"))[0].key).toBe("policy");
+    expect((await run("tree"))[0].children[0].key).toBe("policy");
+    expect((await run("show", "policy")).document).toBe(
+      "knowledge/company/policy.md",
     );
     expect(
-      (await cli(["--root", root, "knowledge", "sync", "incident-response"]))
-        .stdout,
-    ).toContain("Knowledge is current");
-
-    const shown = JSON.parse(
-      (
-        await cli([
-          "--root",
-          root,
-          "knowledge",
-          "show",
-          "incident-response",
-          "--json",
-        ])
-      ).stdout,
-    ) as { overview: string; fresh: boolean };
-    expect(shown).toEqual(
-      expect.objectContaining({
-        overview: "knowledge/operations/incident-response/overview.md",
-        fresh: true,
-      }),
+      (await cli(["--root", root, "knowledge", "show", "policy"])).stdout,
+    ).toContain("knowledge/company/policy.md");
+    const original = await readFile(
+      path.join(root, "knowledge/company/policy.md"),
     );
-    const tree = JSON.parse(
-      (await cli(["--root", root, "knowledge", "tree", "--json"])).stdout,
-    ) as Array<{ key: string }>;
-    expect(tree[0]?.key).toBe("incident-response");
-
-    await expect(
-      cli(["--root", root, "knowledge", "show", "missing"]),
-    ).rejects.toMatchObject({
-      code: 2,
-      stderr: expect.stringContaining("AIO-KNOWLEDGE-NOT-FOUND"),
-    });
-    await expect(
-      cli(["--root", root, "knowledge", "sync", "missing", "--json"]),
-    ).rejects.toMatchObject({
-      code: 2,
-      stderr: expect.stringContaining("AIO-KNOWLEDGE-NOT-FOUND"),
-    });
-  });
-
-  test("creates, previews moves, moves, and discards Knowledge", async () => {
-    const root = await tempRoot();
-    await cli(["init", root]);
-    for (const command of ["new", "move", "discard"]) {
-      const help = await cli(["knowledge", command, "--help"]);
-      expect(help.stdout).toContain("--json");
-    }
-
-    const created = JSON.parse(
-      (
-        await cli([
-          "--root",
-          root,
-          "knowledge",
-          "new",
-          "operations",
-          "--display-name",
-          "Operations",
-          "--json",
-        ])
-      ).stdout,
-    ) as { key: string; fresh: boolean };
-    expect(created).toEqual(
-      expect.objectContaining({ key: "operations", fresh: true }),
-    );
-    const existingPath = path.join(root, "knowledge", "company", "handbook");
-    await mkdir(existingPath, { recursive: true });
-    await writeFile(
-      path.join(existingPath, "overview.md"),
-      "# Existing handbook\n",
-    );
-    const adopted = JSON.parse(
-      (
-        await cli([
-          "--root",
-          root,
-          "knowledge",
-          "new",
-          "handbook",
-          "--path",
-          "company/handbook",
-          "--json",
-        ])
-      ).stdout,
-    ) as { adopted: boolean; fresh: boolean };
-    expect(adopted).toEqual(
-      expect.objectContaining({ adopted: true, fresh: false }),
-    );
-    expect(await readFile(path.join(existingPath, "overview.md"), "utf8")).toBe(
-      "# Existing handbook\n",
-    );
-    const child = await cli([
-      "--root",
-      root,
-      "knowledge",
-      "new",
-      "incidents",
-      "--parent",
-      "operations",
-    ]);
-    expect(child.stdout).toContain("Created Knowledge — incidents");
-    expect(child.stdout).toContain("operations/incidents");
-
-    const registryPath = path.join(root, "knowledge", "registry.md");
-    const beforePreview = await readFile(registryPath);
-    const preview = JSON.parse(
-      (
-        await cli([
-          "--root",
-          root,
-          "knowledge",
-          "move",
-          "incidents",
-          "--path",
-          "incidents",
-          "--no-parent",
-          "--dry-run",
-          "--json",
-        ])
-      ).stdout,
-    ) as { applied: boolean; parent: string | null };
-    expect(preview).toEqual(
-      expect.objectContaining({ applied: false, parent: null }),
-    );
-    expect(await readFile(registryPath)).toEqual(beforePreview);
-
-    const moved = JSON.parse(
-      (
-        await cli([
-          "--root",
-          root,
-          "knowledge",
-          "move",
-          "incidents",
-          "--path",
-          "incidents",
-          "--no-parent",
-          "--json",
-        ])
-      ).stdout,
-    ) as { applied: boolean; destinationPath: string };
-    expect(moved).toEqual(
-      expect.objectContaining({ applied: true, destinationPath: "incidents" }),
-    );
-
-    const discardPreview = await cli([
-      "--root",
-      root,
-      "knowledge",
-      "discard",
-      "incidents",
+    const preview = await run(
+      "move",
+      "policy",
+      "--path",
+      "policy.md",
       "--dry-run",
-    ]);
-    expect(discardPreview.stdout).toContain("Discard preview — incidents");
-    expect(discardPreview.stdout).toContain("No changes made");
-    const discarded = JSON.parse(
-      (
-        await cli([
-          "--root",
-          root,
-          "knowledge",
-          "discard",
-          "incidents",
-          "--confirm",
-          "incidents",
-          "--json",
-        ])
-      ).stdout,
-    ) as { applied: boolean; trashTarget: string };
+    );
+    expect(preview.postActions).toEqual([]);
+    const moved = await run("move", "policy", "--path", "policy.md");
+    expect(moved.postActions[0].message).toContain(
+      "relative links inside the moved document",
+    );
+    expect(await readFile(path.join(root, "knowledge/policy.md"))).toEqual(
+      original,
+    );
+    expect(
+      (await run("move", "policy", "--path", "policy.md")).postActions,
+    ).toEqual([]);
+    expect((await run("discard", "policy", "--dry-run")).postActions).toEqual(
+      [],
+    );
+    const discarded = await run("discard", "policy", "--confirm", "policy");
     expect(discarded.applied).toBe(true);
-    expect(discarded.trashTarget).toContain(
-      ".aiongside/trash/knowledge/incidents-",
-    );
-  });
-
-  test("reports Knowledge option, target, conflict, and confirmation errors", async () => {
-    const root = await tempRoot();
-    await cli(["init", root]);
-    await cli(["--root", root, "knowledge", "new", "operations"]);
-
-    await expect(
-      cli([
-        "--root",
-        root,
-        "knowledge",
-        "move",
-        "operations",
-        "--path",
-        "company/operations",
-        "--parent",
-        "operations",
-        "--no-parent",
-      ]),
-    ).rejects.toMatchObject({
-      code: 2,
-      stderr: expect.stringContaining("AIO-KNOWLEDGE-PARENT"),
-    });
-    await expect(
-      cli([
-        "--root",
-        root,
-        "knowledge",
-        "move",
-        "missing",
-        "--path",
-        "missing",
-      ]),
-    ).rejects.toMatchObject({
-      code: 2,
-      stderr: expect.stringContaining("AIO-KNOWLEDGE-NOT-FOUND"),
-    });
-    await expect(
-      cli(["--root", root, "knowledge", "new", "operations"]),
-    ).rejects.toMatchObject({
-      code: 2,
-      stderr: expect.stringContaining("AIO-KNOWLEDGE-CREATE-CONFLICT"),
-    });
-    await expect(
-      cli(["--root", root, "knowledge", "discard", "operations"]),
-    ).rejects.toMatchObject({
-      code: 2,
-      stderr: expect.stringContaining("AIO-KNOWLEDGE-DISCARD-CONFIRM"),
-    });
-    await cli([
-      "--root",
-      root,
-      "knowledge",
-      "new",
-      "incidents",
-      "--parent",
-      "operations",
+    expect(discarded.postActions[0].commands).toEqual([
+      "aiongside check --json",
     ]);
-    await expect(
-      cli([
-        "--root",
-        root,
-        "knowledge",
-        "discard",
-        "operations",
-        "--confirm",
-        "operations",
-      ]),
-    ).rejects.toMatchObject({
-      code: 2,
-      stderr: expect.stringContaining("AIO-KNOWLEDGE-DISCARD-CHILDREN"),
-    });
-    await cli(["--root", root, "work", "new", "Knowledge reference"]);
-    await cli([
-      "--root",
-      root,
-      "work",
-      "knowledge",
-      "add",
-      "WORK-1",
-      "incidents",
-    ]);
-    await expect(
-      cli([
-        "--root",
-        root,
-        "knowledge",
-        "discard",
-        "incidents",
-        "--confirm",
-        "incidents",
-      ]),
-    ).rejects.toMatchObject({
-      code: 2,
-      stderr: expect.stringContaining("AIO-KNOWLEDGE-DISCARD-REFERENCED"),
-    });
+    expect(await run("list")).toEqual([]);
+    expect(
+      await readFile(path.join(root, discarded.trashTarget, "content.md")),
+    ).toEqual(original);
   });
 
-  test("documents and runs Agent Skill sync", async () => {
+  test("rejects duplicate keys, reserved paths, removed options and sync", async () => {
     const root = await tempRoot();
     await cli(["init", root]);
-    const help = await cli(["skill", "sync", "--help"]);
-    expect(help.stdout).toContain("Restore managed agent integration");
-
-    const configPath = path.join(root, ".aiongside", "config.yaml");
-    await writeFile(
-      configPath,
-      (await readFile(configPath, "utf8")).replace(
-        "agentSkillVersion: 8\n",
-        "",
-      ),
+    await cli(["--root", root, "knowledge", "new", "policy"]);
+    for (const args of [
+      ["new", "policy"],
+      ["new", "second", "--path", "policy.md"],
+      ["new", "second", "--path", "index.md"],
+      ["new", "second", "--path", "../outside.md"],
+      ["new", "second", "--parent", "policy"],
+      ["move", "policy", "--path", "x.md", "--no-parent"],
+      ["sync", "policy"],
+      ["show", "absent"],
+      ["discard", "policy"],
+      ["discard", "policy", "--confirm", "wrong"],
+    ])
+      await expect(
+        cli(["--root", root, "knowledge", ...args]),
+      ).rejects.toMatchObject({ code: 2 });
+    expect((await cli(["knowledge", "--help"])).stdout).not.toMatch(
+      /sync|freshness|Registry/,
     );
-    await rm(path.join(root, ".agents"), { recursive: true, force: true });
-    await rm(path.join(root, ".claude"), { recursive: true, force: true });
-    const nested = path.join(root, "work", "nested");
-    await mkdir(nested, { recursive: true });
-
-    const synced = await cli(["--root", nested, "skill", "sync"]);
-    expect(synced.stdout).toContain("Agent integration synced (version 8)");
-    expect(synced.stdout).toContain(
-      "+ Created  .agents/skills/aiongside/SKILL.md",
-    );
-    expect(synced.stdout).toContain(
-      "+ Created  .claude/skills/aiongside/SKILL.md",
-    );
-    expect(synced.stdout).toContain("+ Created  .claude/settings.json");
-    expect(synced.stdout).toContain("~ Updated  .aiongside/config.yaml");
-    expect(synced.stdout).toContain("Approve project Hooks");
-
-    const noOp = await cli(["--root", root, "skill", "sync"]);
-    expect(noOp.stdout).toContain(
-      "✓ Agent integration is current (version 8)\n",
-    );
-    expect(noOp.stdout).toContain("Approve project Hooks");
   });
 
-  test("reports Agent Skill sync conflicts with exit code 2", async () => {
+  test("exposes integration and doctor without retired command namespaces", async () => {
     const root = await tempRoot();
     await cli(["init", root]);
-    const target = path.join(
-      root,
-      ".agents",
-      "skills",
-      "aiongside",
-      "SKILL.md",
-    );
-    await writeFile(target, "# Team-owned skill\n");
-
-    await expect(cli(["--root", root, "skill", "sync"])).rejects.toMatchObject({
+    expect((await cli(["workspace", "--help"])).stdout).toContain("upgrade");
+    expect(
+      (await cli(["--root", root, "workspace", "upgrade"])).stdout,
+    ).toContain("current");
+    expect(
+      JSON.parse((await cli(["--root", root, "doctor", "--json"])).stdout).ok,
+    ).toBe(true);
+    for (const command of ["skill", "hook"])
+      await expect(cli([command])).rejects.toMatchObject({ code: 2 });
+    for (const command of ["confirm", "cancel", "review", "resolve"])
+      await expect(cli(["work", command])).rejects.toMatchObject({ code: 2 });
+  });
+  test("reports integration conflicts with exit code 2", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    await writeFile(path.join(root, ".codex/hooks.json"), "{broken");
+    await expect(
+      cli(["--root", root, "workspace", "upgrade"]),
+    ).rejects.toMatchObject({
       code: 2,
-      stderr: expect.stringContaining("AIO-SKILL-CONFLICT"),
+      stderr: expect.stringContaining("AIO-HOOK-CONFLICT"),
     });
   });
-
-  test("injects only managed instructions and user rules on session start", async () => {
+  test("injects only managed instructions and ignores legacy user rules on session start", async () => {
     const root = await tempRoot();
     const initialized = await cli(["init", root]);
     expect(initialized.stdout).toContain(".aiongside/instructions.md");
@@ -598,19 +450,13 @@ describe("CLI", () => {
     await cli(["--root", root, "work", "new", "Do not preload this Record"]);
     await registerKnowledge(root, false);
     await writeFile(
-      path.join(
-        root,
-        "knowledge",
-        "operations",
-        "incident-response",
-        "private-runbook.md",
-      ),
+      path.join(root, "knowledge", "operations", "private-runbook.txt"),
       "Do not preload this Knowledge content.\n",
     );
     const nested = path.join(root, "work", "WORK-1");
 
     const result = await cli(
-      ["hook", "session-start"],
+      ["session-start"],
       JSON.stringify({ cwd: nested, hook_event_name: "SessionStart" }),
     );
     const output = JSON.parse(result.stdout) as {
@@ -627,22 +473,31 @@ describe("CLI", () => {
     expect(output.hookSpecificOutput.additionalContext).toContain(
       "AIongside managed instructions",
     );
-    expect(output.hookSpecificOutput.additionalContext).toContain(
+    expect(output.hookSpecificOutput.additionalContext).not.toContain(
       "Use the team vocabulary.",
     );
     expect(output.hookSpecificOutput.additionalContext).not.toContain(
+      "# Workspace rules",
+    );
+    expect(await readFile(rulesPath, "utf8")).toBe(customRules);
+    const context = JSON.parse(
+      (await cli(["--root", root, "context", "--json"])).stdout,
+    );
+    expect(context).not.toHaveProperty("rules");
+    const humanContext = await cli(["--root", root, "context"]);
+    expect(humanContext.stdout).toContain("Document and folder roles");
+    expect(humanContext.stdout).not.toContain("Use the team vocabulary.");
+    expect(output.hookSpecificOutput.additionalContext).not.toContain(
       "Do not preload this Record",
     );
-    expect(output.hookSpecificOutput.additionalContext).toContain(
-      "aiongside knowledge",
-    );
+    expect(output.hookSpecificOutput.additionalContext).toContain("aiongside");
     expect(output.hookSpecificOutput.additionalContext).not.toContain(
       "Do not preload this Knowledge content",
     );
 
     await rm(path.join(root, ".aiongside", "instructions.md"));
     const missing = await cli(
-      ["hook", "session-start"],
+      ["session-start"],
       JSON.stringify({ cwd: root, hook_event_name: "SessionStart" }),
     );
     const missingOutput = JSON.parse(missing.stdout) as {
@@ -652,67 +507,31 @@ describe("CLI", () => {
       ".aiongside/instructions.md",
     );
     expect(missingOutput.hookSpecificOutput.additionalContext).toContain(
-      "aiongside skill sync",
+      "aiongside workspace upgrade",
     );
   });
 
   test("allows a valid stop and blocks a failing check only once", async () => {
     const root = await tempRoot();
     await cli(["init", root]);
-    const validEvent = JSON.stringify({
-      cwd: root,
-      hook_event_name: "Stop",
-      stop_hook_active: false,
-    });
-    expect((await cli(["hook", "stop"], validEvent)).stdout).toBe("{}\n");
-
-    const instructionsPath = path.join(root, ".aiongside", "instructions.md");
-    await rm(instructionsPath);
-    const blocked = JSON.parse(
-      (await cli(["hook", "stop"], validEvent)).stdout,
-    ) as { decision: string; reason: string };
-    expect(blocked.decision).toBe("block");
-    expect(blocked.reason).toContain("AIO-INSTRUCTIONS-MISSING");
-
-    const retryEvent = JSON.stringify({
-      cwd: root,
-      hook_event_name: "Stop",
-      stop_hook_active: true,
-    });
-    const retry = JSON.parse(
-      (await cli(["hook", "stop"], retryEvent)).stdout,
-    ) as { decision?: string; systemMessage: string };
-    expect(retry.decision).toBeUndefined();
-    expect(retry.systemMessage).toContain("AIO-INSTRUCTIONS-MISSING");
-    await expect(readFile(instructionsPath, "utf8")).rejects.toMatchObject({
-      code: "ENOENT",
-    });
-  });
-
-  test("passes Knowledge stale through the bounded Stop Hook contract", async () => {
-    const root = await tempRoot();
-    await cli(["init", root]);
-    await registerKnowledge(root, false);
-    const event = JSON.stringify({
-      cwd: root,
-      hook_event_name: "Stop",
-      stop_hook_active: false,
-    });
-
-    const blocked = JSON.parse((await cli(["hook", "stop"], event)).stdout) as {
-      decision: string;
-      reason: string;
-    };
-    expect(blocked.decision).toBe("block");
-    expect(blocked.reason).toContain("AIO-KNOWLEDGE-STALE");
-    expect(blocked.reason).toContain(
-      "aiongside knowledge sync incident-response",
+    const event = JSON.stringify({ cwd: root, hook_event_name: "Stop" });
+    expect(JSON.parse((await cli(["stop"], event)).stdout)).toEqual({});
+    await writeFile(path.join(root, ".aiongside/instructions.md"), "# Drift\n");
+    expect(JSON.parse((await cli(["stop"], event)).stdout)).toEqual({});
+    await writeFile(path.join(root, "views/open.md"), "# Drift\n");
+    const check = await cli(["--root", root, "check", "--json"]).catch(
+      (error) => error,
     );
-
+    expect(check.code).toBe(1);
+    const issue = JSON.parse(check.stdout).issues[0];
+    const blocked = JSON.parse((await cli(["stop"], event)).stdout);
+    expect(blocked.decision).toBe("block");
+    expect(blocked.reason).toContain(issue.message);
+    expect(blocked.reason).toContain(issue.hint);
     const retry = JSON.parse(
       (
         await cli(
-          ["hook", "stop"],
+          ["stop"],
           JSON.stringify({
             cwd: root,
             hook_event_name: "Stop",
@@ -720,9 +539,41 @@ describe("CLI", () => {
           }),
         )
       ).stdout,
-    ) as { decision?: string; systemMessage: string };
+    );
     expect(retry.decision).toBeUndefined();
-    expect(retry.systemMessage).toContain("AIO-KNOWLEDGE-STALE");
+    expect(retry.systemMessage).toContain(issue.message);
+  });
+  test("passes index omissions and duplicate keys through the bounded Stop Hook", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    await registerKnowledge(root, false);
+    const input = JSON.stringify({ cwd: root, hook_event_name: "Stop" });
+    const stopped = JSON.parse((await cli(["stop"], input)).stdout);
+    expect(JSON.stringify(stopped)).toContain("AIO-KNOWLEDGE-INDEX-OMISSION");
+    expect(JSON.stringify(stopped)).toContain("knowledge/index.md");
+    expect(JSON.stringify(stopped)).not.toContain("knowledge sync");
+    const doc = await readFile(
+      path.join(root, "knowledge/operations/incident-response.md"),
+    );
+    await writeFile(path.join(root, "knowledge/duplicate.md"), doc);
+    const failed = await cli(["--root", root, "check", "--json"]).catch(
+      (error) => error,
+    );
+    expect(failed.code).toBe(1);
+    expect(
+      JSON.parse(failed.stdout).issues.filter(
+        (issue: { code: string }) => issue.code === "AIO-KNOWLEDGE-KEY",
+      ),
+    ).toHaveLength(2);
+    const repeated = await cli(
+      ["stop"],
+      JSON.stringify({
+        cwd: root,
+        hook_event_name: "Stop",
+        stop_hook_active: true,
+      }),
+    );
+    expect(JSON.parse(repeated.stdout).decision).not.toBe("block");
   });
 
   test("rejects malformed Hook input without changing workspace files", async () => {
@@ -731,18 +582,18 @@ describe("CLI", () => {
     const configPath = path.join(root, ".aiongside", "config.yaml");
     const before = await readFile(configPath, "utf8");
 
-    await expect(cli(["hook", "stop"], "not-json")).rejects.toMatchObject({
+    await expect(cli(["stop"], "not-json")).rejects.toMatchObject({
       code: 2,
-      stderr: expect.stringContaining("AIO-HOOK-INPUT"),
+      stderr: expect.stringContaining("AIO-ADAPTER-INPUT"),
     });
     await expect(
       cli(
-        ["hook", "session-start"],
+        ["session-start"],
         JSON.stringify({ cwd: root, hook_event_name: "Stop" }),
       ),
     ).rejects.toMatchObject({
       code: 2,
-      stderr: expect.stringContaining("AIO-HOOK-INPUT"),
+      stderr: expect.stringContaining("AIO-ADAPTER-INPUT"),
     });
     expect(await readFile(configPath, "utf8")).toBe(before);
   });
@@ -808,6 +659,7 @@ describe("CLI", () => {
     await cli(["init", root]);
     await cli(["--root", root, "work", "new", "Knowledge-linked work"]);
     await registerKnowledge(root);
+    await cli(["--root", root, "work", "move", "WORK-1", "done"]);
 
     const added = await cli([
       "--root",
@@ -818,8 +670,8 @@ describe("CLI", () => {
       "work-1",
       "Incident-Response",
     ]);
-    expect(added.stdout).toBe(
-      "✓ Added Knowledge relationship — WORK-1 → incident-response (operations/incident-response)\n",
+    expect(added.stdout).toContain(
+      "✓ Recorded Knowledge contribution — WORK-1 → incident-response (knowledge/operations/incident-response.md). Knowledge content was not changed.\n",
     );
     const duplicate = await cli([
       "--root",
@@ -830,7 +682,7 @@ describe("CLI", () => {
       "WORK-1",
       "incident-response",
     ]);
-    expect(duplicate.stdout).toContain("already exists");
+    expect(duplicate.stdout).toContain("already recorded");
 
     const removed = await cli([
       "--root",
@@ -841,8 +693,8 @@ describe("CLI", () => {
       "WORK-1",
       "incident-response",
     ]);
-    expect(removed.stdout).toBe(
-      "✓ Removed Knowledge relationship — WORK-1 ⇥ incident-response\n",
+    expect(removed.stdout).toContain(
+      "✓ Removed Knowledge contribution record — WORK-1 → incident-response (knowledge/operations/incident-response.md). Knowledge content was not changed.\n",
     );
     const absent = await cli([
       "--root",
@@ -854,9 +706,190 @@ describe("CLI", () => {
       "incident-response",
     ]);
     expect(absent.stdout).toContain("already absent");
+    expect(added.stdout).not.toContain("update the Knowledge");
+    expect(added.stdout).not.toContain("knowledge sync");
+    expect(removed.stdout).toContain("Ask the user");
+    expect(removed.stdout).toContain("origin is unclear");
+    expect(absent.stdout).not.toContain("Ask the user");
     expect((await cli(["--root", root, "check"])).stdout).toBe(
       "✓ Check passed\n",
     );
+  });
+
+  test("records a contribution without new update actions or semantic verification", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    await cli(["--root", root, "work", "new", "Follow-up work"]);
+    await cli(["--root", root, "knowledge", "new", "policy"]);
+    await cli(["--root", root, "work", "move", "WORK-1", "done"]);
+    await writeFile(
+      path.join(root, "knowledge/index.md"),
+      "[Policy](policy.md)\n",
+    );
+    const overview = path.join(root, "knowledge/policy.md");
+    const before = await readFile(overview, "utf8");
+    const call = async (action: string) =>
+      JSON.parse(
+        (
+          await cli([
+            "--root",
+            root,
+            "work",
+            "knowledge",
+            action,
+            "WORK-1",
+            "policy",
+            "--json",
+          ])
+        ).stdout,
+      );
+    const added = await call("add");
+    expect(added.message).toContain("Recorded Knowledge contribution");
+    expect(added.message).toContain("Knowledge content was not changed");
+    expect(added.record).toBe("work/WORK-1/record.md");
+    expect(added.postActions).toEqual([]);
+    expect((await call("add")).postActions).toEqual([]);
+    const removed = await call("remove");
+    expect(removed.postActions[0].kind).toBe("knowledge-removal-question");
+    expect(removed.postActions[0].message).toContain(
+      "obtain approval before editing",
+    );
+    expect((await call("remove")).postActions).toEqual([]);
+    expect(await readFile(overview, "utf8")).toBe(before);
+    expect(
+      JSON.parse((await cli(["--root", root, "check", "--json"])).stdout).ok,
+    ).toBe(true);
+  });
+
+  test("explains incorporation before add and preserves Work sync only", async () => {
+    const add = (await cli(["work", "knowledge", "add", "--help"])).stdout;
+    expect(add).toContain(
+      "Incorporate the Work results into Knowledge before running add",
+    );
+    expect(add).toContain("not a reference or a request to update content");
+    expect(add).toContain("does not edit content or verify incorporation");
+    expect(
+      (await cli(["work", "knowledge", "remove", "--help"])).stdout,
+    ).toContain("without deleting Knowledge content");
+    expect((await cli(["work", "sync", "--help"])).stdout).toContain("hash");
+    expect((await cli(["knowledge", "--help"])).stdout).not.toContain("sync");
+  });
+
+  test("incorporates Knowledge and repairs routing before recording without changing the seal", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    await cli(["--root", root, "work", "new", "Confirmed venue capacity"]);
+    await cli(["--root", root, "work", "move", "WORK-1", "done"]);
+    const recordPath = path.join(root, "work/WORK-1/record.md");
+    const seal = (await readFile(recordPath, "utf8")).match(
+      /completionSeal:[\s\S]*?\n---/,
+    )?.[0];
+    await cli(["--root", root, "knowledge", "new", "venues"]);
+    const target = path.join(root, "knowledge/venues.md");
+    const content =
+      (await readFile(target, "utf8")) +
+      "\nVerify actual capacity before selecting a venue.\n";
+    await writeFile(target, content);
+    await writeFile(
+      path.join(root, "knowledge/index.md"),
+      "[Venue selection](venues.md)\n",
+    );
+    const args = [
+      "--root",
+      root,
+      "work",
+      "knowledge",
+      "add",
+      "WORK-1",
+      "venues",
+      "--json",
+    ];
+    const added = JSON.parse((await cli(args)).stdout);
+    expect(added.changed).toBe(true);
+    expect(added.postActions).toEqual([]);
+    expect(
+      (await readFile(recordPath, "utf8")).match(
+        /completionSeal:[\s\S]*?\n---/,
+      )?.[0],
+    ).toBe(seal);
+    expect(await readFile(target, "utf8")).toBe(content);
+    expect(JSON.parse((await cli(args)).stdout).changed).toBe(false);
+    expect(
+      JSON.parse((await cli(["--root", root, "check", "--json"])).stdout).ok,
+    ).toBe(true);
+  });
+
+  test("preserves the original document recovery hint when another Work blocks a mutation", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    await cli(["--root", root, "work", "new", "Changed source"]);
+    await cli(["--root", root, "work", "new", "Unchanged target"]);
+    const sourcePath = path.join(root, "work/WORK-1/record.md");
+    const targetPath = path.join(root, "work/WORK-2/record.md");
+    await writeFile(
+      sourcePath,
+      `${await readFile(sourcePath, "utf8")}\nNew confirmed result.\n`,
+    );
+    const before = await readFile(targetPath, "utf8");
+    const check = await cli(["--root", root, "check", "--json"]).catch(
+      (error) => error,
+    );
+    const issue = JSON.parse(check.stdout).issues.find(
+      (item: { code: string }) => item.code === "AIO-OVERVIEW-STALE",
+    );
+    expect(issue.hint).toContain("aiongside work sync WORK-1");
+    await expect(
+      cli(["--root", root, "work", "move", "WORK-2", "active"]),
+    ).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining(issue.hint),
+    });
+    expect(await readFile(targetPath, "utf8")).toBe(before);
+  });
+
+  test("returns move guidance with actual paths and no applied actions for dry-run", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    await cli(["--root", root, "knowledge", "new", "policy"]);
+    const args = [
+      "--root",
+      root,
+      "knowledge",
+      "move",
+      "policy",
+      "--path",
+      "new-policy.md",
+      "--json",
+    ];
+    const preview = JSON.parse((await cli([...args, "--dry-run"])).stdout);
+    expect(preview.postActions).toEqual([]);
+    const moved = JSON.parse((await cli(args)).stdout);
+    expect(moved.postActions[0].paths).toContain("knowledge/policy.md");
+    expect(moved.postActions[0].paths).toContain("knowledge/new-policy.md");
+    expect(moved.postActions[0].message).toContain("links were not rewritten");
+    expect(moved.postActions[0].commands).toContain("aiongside check --json");
+  });
+
+  test("project version refusal is separate from integration and does not block check", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    const integration = path.join(root, ".aiongside/internal/integration.json");
+    const before = await readFile(integration, "utf8");
+    await cli(["--root", root, "workspace", "upgrade", "--skip-version", "3"]);
+    expect(
+      JSON.parse(
+        await readFile(
+          path.join(root, ".aiongside/internal/update-preferences.json"),
+          "utf8",
+        ),
+      ).skippedVersions,
+    ).toEqual(["3"]);
+    expect(await readFile(integration, "utf8")).toBe(before);
+    expect(
+      JSON.parse((await cli(["--root", root, "check", "--json"])).stdout).ok,
+    ).toBe(true);
+    await cli(["--root", root, "workspace", "upgrade"]);
+    expect(await readFile(integration, "utf8")).toBe(before);
   });
 
   test("reports Work Knowledge command failures with exit code 2", async () => {
@@ -864,6 +897,7 @@ describe("CLI", () => {
     await cli(["init", root]);
     await cli(["--root", root, "work", "new", "Knowledge-linked work"]);
     await registerKnowledge(root);
+    await cli(["--root", root, "work", "move", "WORK-1", "done"]);
 
     await expect(
       cli(["--root", root, "work", "knowledge", "add", "WORK-1", "missing"]),
@@ -906,7 +940,7 @@ describe("CLI", () => {
       stderr: expect.stringContaining("AIO-DEPENDENCY-CYCLE"),
     });
 
-    const checks = [
+    const _checks = [
       "scope",
       "completion",
       "verification",
@@ -914,7 +948,6 @@ describe("CLI", () => {
       "knowledge",
     ];
     for (const id of ["WORK-2", "WORK-1"]) {
-      await cli(["--root", root, "work", "confirm", id, ...checks]);
       await cli(["--root", root, "work", "move", id, "done"]);
     }
     await expect(
@@ -991,63 +1024,42 @@ describe("CLI", () => {
     expect(await readFile(recordPath, "utf8")).toBe(before);
   });
 
-  test("prints no-impact and linked Knowledge review details for done dry-runs", async () => {
+  test("returns one-time Knowledge guidance only for an actual done move", async () => {
     const root = await tempRoot();
     await cli(["init", root]);
-    await cli(["--root", root, "work", "new", "No Knowledge update"]);
-
-    const noImpact = await cli([
-      "--root",
-      root,
-      "work",
-      "move",
-      "WORK-1",
-      "done",
-      "--dry-run",
+    await cli(["--root", root, "work", "new", "Booking"]);
+    const args = ["--root", root, "work", "move", "WORK-1", "done", "--json"];
+    expect(
+      JSON.parse((await cli([...args, "--dry-run"])).stdout).postActions,
+    ).toBeUndefined();
+    const done = JSON.parse((await cli(args)).stdout);
+    expect(done.postActions).toEqual([
+      expect.objectContaining({ kind: "knowledge-update", workId: "WORK-1" }),
     ]);
-    expect(noImpact.stdout).toContain("Knowledge");
-    expect(noImpact.stdout).toContain("no lasting Knowledge impact");
-
-    await cli(["--root", root, "work", "new", "Update incident guidance"]);
-    await registerKnowledge(root);
-    await cli([
-      "--root",
-      root,
-      "work",
-      "knowledge",
-      "add",
-      "WORK-2",
-      "incident-response",
-    ]);
-    const linked = await cli([
-      "--root",
-      root,
-      "work",
-      "move",
-      "WORK-2",
-      "done",
-      "--dry-run",
-      "--json",
-    ]);
-    const result = JSON.parse(linked.stdout) as {
-      knowledgeReview: {
-        confirmed: boolean;
-        targets: Array<{ key: string; path: string; overview: string }>;
-      };
-    };
-    expect(result.knowledgeReview).toEqual({
-      confirmed: false,
-      targets: [
-        {
-          key: "incident-response",
-          path: "operations/incident-response",
-          overview: "knowledge/operations/incident-response/overview.md",
-          fresh: true,
-        },
-      ],
-    });
+    expect(done.postActions[0].message).toContain("no further action");
+    expect(done.postActions[0].message).toContain("Read work/WORK-1/record.md");
+    expect(done.postActions[0].message).toContain("aiongside knowledge list");
+    expect(done.postActions[0].message).toContain(
+      "without duplicating existing material",
+    );
+    expect(done.postActions[0].message).toContain(
+      "After incorporating the Work results",
+    );
+    expect(done.postActions[0].message).toContain(
+      "aiongside work knowledge add WORK-1 <key>",
+    );
+    expect(done.postActions[0].message).toContain(
+      "only if that relationship is absent",
+    );
+    expect(done.postActions[0].message).toContain(
+      "Do not add relationships for reference-only topics",
+    );
+    expect(done.postActions[0].message).not.toContain("Consider updating");
+    expect(JSON.parse((await cli(args)).stdout).postActions).toBeUndefined();
+    expect(
+      JSON.parse((await cli(["--root", root, "check", "--json"])).stdout).ok,
+    ).toBe(true);
   });
-
   test("rejects missing transition input and records explicit values", async () => {
     const root = await tempRoot();
     await cli(["init", root]);
@@ -1090,13 +1102,13 @@ describe("CLI", () => {
     expect(record).toContain("resumeWhen: Review is complete");
   });
 
-  test("uses the same cancellation contract for move and cancel", async () => {
+  test("cancels through move and lists every supported status", async () => {
     const root = await tempRoot();
     await cli(["init", root]);
-    await cli(["--root", root, "work", "new", "Move cancellation"]);
-    await cli(["--root", root, "work", "new", "Cancel alias"]);
-    const common = ["--cancellation-reason", "No longer needed", "--json"];
-
+    await cli(["--root", root, "work", "new", "Cancelled booking"]);
+    await expect(
+      cli(["--root", root, "work", "move", "WORK-1", "cancelled"]),
+    ).rejects.toMatchObject({ code: 2 });
     const moved = JSON.parse(
       (
         await cli([
@@ -1106,24 +1118,18 @@ describe("CLI", () => {
           "move",
           "WORK-1",
           "cancelled",
-          ...common,
+          "--cancellation-reason",
+          "No longer needed",
+          "--json",
         ])
       ).stdout,
-    ) as Record<string, unknown>;
-    const cancelled = JSON.parse(
-      (await cli(["--root", root, "work", "cancel", "WORK-2", ...common]))
-        .stdout,
-    ) as Record<string, unknown>;
-
-    expect({ ...moved, id: "same" }).toEqual({ ...cancelled, id: "same" });
-    expect(
-      await readFile(path.join(root, "work", "WORK-1", "record.md"), "utf8"),
-    ).toContain("cancellationReason: No longer needed");
-    expect(
-      await readFile(path.join(root, "work", "WORK-2", "record.md"), "utf8"),
-    ).toContain("cancellationReason: No longer needed");
+    );
+    expect(moved.to).toBe("cancelled");
+    expect(moved.postActions).toBeUndefined();
+    const help = (await cli(["work", "move", "--help"])).stdout;
+    for (const status of ["inbox", "active", "waiting", "done", "cancelled"])
+      expect(help).toContain(status);
   });
-
   test("reports completion invalidation and dependent warnings", async () => {
     const root = await tempRoot();
     await cli(["init", root]);
@@ -1137,7 +1143,7 @@ describe("CLI", () => {
         "needs:\n  - WORK-1",
       ),
     );
-    const checks = [
+    const _checks = [
       "scope",
       "completion",
       "verification",
@@ -1145,7 +1151,6 @@ describe("CLI", () => {
       "knowledge",
     ];
     for (const id of ["WORK-1", "WORK-2"]) {
-      await cli(["--root", root, "work", "confirm", id, ...checks]);
       await cli(["--root", root, "work", "move", id, "done"]);
     }
 
@@ -1169,7 +1174,7 @@ describe("CLI", () => {
     expect(result.invalidatesCompletion).toBe(true);
     expect(result.warnings.join("\n")).toContain("WORK-2");
     expect(result.changes.join("\n")).toContain(
-      "Reset verification, outcome, and knowledge confirmations.",
+      "Invalidate the existing completion seal.",
     );
   });
 
@@ -1205,7 +1210,9 @@ describe("CLI", () => {
       "WORK-1",
     ]);
     expect(discarded.stdout).toContain("✓ Discarded WORK-1");
-    expect(discarded.stdout).toContain("• Recovery  .aiongside/trash/WORK-1-");
+    expect(discarded.stdout).toContain(
+      "• Recovery  .aiongside/internal/trash/WORK-1-",
+    );
   });
 
   test("reports View drift without writing and rebuilds explicitly", async () => {
@@ -1222,8 +1229,8 @@ describe("CLI", () => {
     });
     expect(await readFile(viewPath, "utf8")).toBe(modified);
 
-    const rebuilt = await cli(["--root", root, "view", "rebuild"]);
-    expect(rebuilt.stdout).toBe("✓ Views rebuilt\n");
+    const rebuilt = await cli(["--root", root, "view", "sync"]);
+    expect(rebuilt.stdout).toBe("✓ Views synced\n");
     expect((await cli(["--root", root, "check"])).stdout).toBe(
       "✓ Check passed\n",
     );

@@ -1,4 +1,7 @@
-import { AGENT_HOOK_COMMANDS } from "@aiongside/core";
+export const AGENT_HOOK_COMMANDS = {
+  sessionStart: "aiongside-agent-adapter session-start",
+  stop: "aiongside-agent-adapter stop",
+} as const;
 
 export const AGENT_INSTRUCTIONS_PATH = ".aiongside/instructions.md";
 

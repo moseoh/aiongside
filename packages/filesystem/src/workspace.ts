@@ -12,35 +12,23 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import {
-  CURRENT_AGENT_SKILL_VERSION,
   calculateMarkdownBodyDigest,
   compareWorkIds,
+  createKnowledgeDocument,
   createOverviewDocument,
   createPlanDocument,
   createRecordDocument,
-  createRulesDocument,
   evaluateTransition,
-  formatKnowledgeOverviewDocument,
   formatMarkdownDocument,
-  isExactAgentSkillSource,
   isMovableStatus,
-  isWorkCheck,
   type KnowledgeCreateInput,
-  type KnowledgeDiscardPlan,
   type KnowledgeEntry,
   KnowledgeMutationError,
-  KnowledgeOverviewFormatError,
-  KnowledgeRegistryFormatError,
   knowledgeEntriesByKey,
+  normalizeKnowledgeKey,
+  normalizeKnowledgePath,
   overviewMetadataSchema,
-  parseAgentSkill,
-  parseKnowledgeOverviewDocument,
-  parseKnowledgeRegistry,
   parseMarkdownDocument,
-  planKnowledgeCreate,
-  planKnowledgeDiscard,
-  planKnowledgeMove,
-  renderKnowledgeRegistry,
   renderViews,
   replaceMarkdownMetadata,
   TEMPLATE_DEFINITIONS,
@@ -50,9 +38,6 @@ import {
   type TransitionRequiredInput,
   type TransitionResult,
   type ValidationIssue,
-  validateKnowledgeRegistryEntries,
-  validateTemplate,
-  type WorkCheck,
   type WorkMetadata,
   type WorkStatus,
   type WorkspaceConfig,
@@ -69,17 +54,26 @@ import {
   mergeAgentHookSettings,
 } from "./agent-integration.js";
 import { WorkspaceError } from "./errors.js";
-import { calculateKnowledgeContentDigest } from "./knowledge-content.js";
+import {
+  INDEX_SOURCE,
+  ROUTING_CODES,
+  safePathKind,
+  scanKnowledge,
+  validateDocumentLinks,
+  workMarkdownDocuments,
+} from "./knowledge-files.js";
 
 const CONFIG_PATH = path.join(".aiongside", "config.yaml");
 const WORK_DIR = "work";
 const OVERVIEW_NAME = "overview.md";
 const RECORD_NAME = "record.md";
 const TEMPLATE_DIR = path.join(".aiongside", "templates");
-const AGENT_SKILL_PATHS = [
-  path.join(".agents", "skills", "aiongside", "SKILL.md"),
-  path.join(".claude", "skills", "aiongside", "SKILL.md"),
-] as const;
+export const WORKSPACE_INTERNAL_DIR = ".aiongside/internal";
+export const INTEGRATION_PATH = `${WORKSPACE_INTERNAL_DIR}/integration.json`;
+export const PROJECT_UPDATE_PREFERENCES_PATH = `${WORKSPACE_INTERNAL_DIR}/update-preferences.json`;
+const STAGING_DIR = `${WORKSPACE_INTERNAL_DIR}/staging`;
+const TRASH_DIR = `${WORKSPACE_INTERNAL_DIR}/trash`;
+export const INTEGRATION_VERSION = 5;
 const VIEW_PATHS = ["views/open.md", "views/closed.md"] as const;
 const SUPPORTING_CONTENT_DIRECTORIES = [
   { name: "references", code: "AIO-STRUCTURE-REFERENCES" },
@@ -110,19 +104,12 @@ export interface MoveWorkOptions extends TransitionInputValues {}
 
 export interface MoveWorkResult extends TransitionResult {
   metadata: WorkMetadata;
-  knowledgeReview?: KnowledgeReview;
-}
-
-export interface KnowledgeReviewTarget {
-  key: string;
-  path: string;
-  overview: string;
-  fresh: boolean;
-}
-
-export interface KnowledgeReview {
-  confirmed: boolean;
-  targets: KnowledgeReviewTarget[];
+  postActions?: {
+    kind: "knowledge-update";
+    workId: string;
+    message: string;
+    targets: { key: string; path: string }[];
+  }[];
 }
 
 export interface DependencyMutationResult {
@@ -144,75 +131,43 @@ export interface KnowledgeMutationResult {
   metadata: WorkMetadata;
 }
 
-export interface KnowledgeInfo {
-  key: string;
-  displayName: string;
-  path: string;
-  parent: string | null;
-  children: string[];
-  overview: string;
-  fresh: boolean;
+export interface KnowledgeInfo extends KnowledgeEntry {
+  document: string;
+  index: string;
 }
 
-export interface KnowledgeTreeNode extends Omit<KnowledgeInfo, "children"> {
+export interface KnowledgeTreeNode {
+  type: "directory" | "document";
+  path: string;
+  key?: string;
+  displayName: string;
   children: KnowledgeTreeNode[];
 }
 
-export interface SyncKnowledgeOverviewResult {
-  key: string;
-  changed: boolean;
-  path: string;
-  overview: string;
-  fresh: true;
-}
-
-export interface CreateKnowledgeResult {
-  key: string;
-  path: string;
-  parent: string | null;
-  displayName: string;
-  overview: string;
-  fresh: boolean;
-  adopted: boolean;
+export interface CreateKnowledgeResult extends KnowledgeInfo {
   changes: string[];
-  staleKeys: string[];
-}
-
-export interface MoveKnowledgeOptions {
-  parent?: string | null;
-  preserveParent?: boolean;
+  indexPaths: string[];
 }
 
 export interface MoveKnowledgeResult {
   key: string;
   sourcePath: string;
   destinationPath: string;
-  previousParent: string | null;
-  parent: string | null;
-  movedKeys: string[];
-  staleKeys: string[];
+  indexPaths: string[];
   warnings: string[];
   applied: boolean;
-  overview: string;
 }
 
 export interface DiscardKnowledgePreview {
   key: string;
   path: string;
-  childKeys: string[];
   referencedBy: string[];
   trashTarget: string;
-  staleKeys: string[];
+  indexPaths: string[];
 }
 
 export interface DiscardKnowledgeResult extends DiscardKnowledgePreview {
   applied: true;
-  registryEntry: {
-    key: string;
-    path: string;
-    parent: string | null;
-    displayName: string;
-  };
 }
 
 export interface SyncOverviewResult {
@@ -221,14 +176,14 @@ export interface SyncOverviewResult {
   path: string;
 }
 
-export interface AgentSkillChange {
+export interface IntegrationChange {
   path: string;
   action: "created" | "updated";
 }
 
-export interface AgentSkillSyncResult {
+export interface IntegrationSyncResult {
   version: number;
-  changes: AgentSkillChange[];
+  changes: IntegrationChange[];
 }
 
 interface ManagedFilePlan {
@@ -283,34 +238,27 @@ export async function initializeWorkspace(
     );
   }
 
-  const agentSkillSource = await loadAgentSkillSource();
-  const agentSkill = requireCurrentAgentSkill(agentSkillSource);
   const agentInstructionsSource = await loadAgentInstructionsSource();
-  const skillPlan = await planAgentSkillTargets(root, agentSkillSource);
+  const versionPlan = await planIntegrationVersion(root);
   const instructionsPlan = await planAgentInstructionsTarget(
     root,
     agentInstructionsSource,
     false,
   );
   const hookPlan = await planAgentHookTargets(root);
-  const integrationPlan = [...skillPlan, instructionsPlan, ...hookPlan];
+  const integrationPlan = [versionPlan, instructionsPlan, ...hookPlan];
 
   const config = workspaceConfigSchema.parse({
     schema: 1,
     name: options.name?.trim() || path.basename(root),
     idPrefix: options.idPrefix?.trim().toUpperCase() || "WORK",
-    agentSkillVersion: agentSkill.version,
   });
 
-  await mkdir(path.join(root, ".aiongside", "trash"), { recursive: true });
+  await mkdir(path.join(root, TRASH_DIR), { recursive: true });
   await mkdir(path.join(root, TEMPLATE_DIR), { recursive: true });
   await mkdir(path.join(root, WORK_DIR), { recursive: true });
   await mkdir(path.join(root, "views"), { recursive: true });
   await mkdir(path.join(root, "knowledge"), { recursive: true });
-  await atomicWrite(
-    path.join(root, ".aiongside", "rules.md"),
-    createRulesDocument(),
-  );
   for (const name of TEMPLATE_NAMES) {
     const definition = TEMPLATE_DEFINITIONS[name];
     await writeIfMissing(
@@ -318,10 +266,7 @@ export async function initializeWorkspace(
       definition.contents,
     );
   }
-  await atomicWrite(
-    path.join(root, "knowledge", "registry.md"),
-    "# Knowledge registry\n\n| Key | Path | Parent | Display name |\n| --- | --- | --- | --- |\n",
-  );
+  await atomicWrite(path.join(root, "knowledge", "index.md"), INDEX_SOURCE);
   await writeViews(root, []);
   await applyAgentIntegrationState(
     root,
@@ -364,26 +309,6 @@ export async function loadConfig(root: string): Promise<WorkspaceConfig> {
   return result.data;
 }
 
-export async function loadAgentSkillSource(): Promise<string> {
-  const candidates = [
-    new URL("../skills/aiongside/SKILL.md", import.meta.url),
-    new URL("../../../skills/aiongside/SKILL.md", import.meta.url),
-  ];
-  for (const candidate of candidates) {
-    try {
-      return await readFile(candidate, "utf8");
-    } catch (error) {
-      if (!isNodeError(error) || error.code !== "ENOENT") {
-        throw error;
-      }
-    }
-  }
-  throw new WorkspaceError(
-    "Cannot read the Agent Skill included with this CLI.",
-    "AIO-SKILL-FORMAT",
-  );
-}
-
 export async function loadAgentInstructionsSource(): Promise<string> {
   const candidates = [
     new URL("../instructions/aiongside.md", import.meta.url),
@@ -404,85 +329,108 @@ export async function loadAgentInstructionsSource(): Promise<string> {
   );
 }
 
-export async function readAgentSessionContext(root: string): Promise<string> {
-  const sections = [
-    {
-      heading: "AIongside managed instructions",
-      relativePath: AGENT_INSTRUCTIONS_PATH,
-      recovery: "Run `aiongside skill sync` to restore this managed file.",
-    },
-    {
-      heading: "Workspace rules",
-      relativePath: path.join(".aiongside", "rules.md"),
-      recovery: "Restore this user-owned file or add workspace rules manually.",
-    },
-  ];
-  const output: string[] = [];
-  for (const section of sections) {
-    output.push(`# ${section.heading}`);
-    const target = path.join(root, section.relativePath);
+export async function readWorkspaceContext(root: string) {
+  const issues: ValidationIssue[] = [];
+  const read = async (relativePath: string) => {
     try {
-      output.push((await readFile(target, "utf8")).trimEnd());
+      return await readFile(path.join(root, relativePath), "utf8");
     } catch (error) {
-      output.push(
-        `Cannot read ${relative(root, target)}: ${errorMessage(error)}\n${section.recovery}`,
-      );
+      issues.push({
+        code: "AIO-CONTEXT-READ",
+        path: relativePath,
+        message: errorMessage(error),
+        hint: "Run `aiongside workspace upgrade`.",
+      });
+      return null;
     }
-  }
-  return `${output.join("\n\n")}\n`;
+  };
+  const instructions = await read(AGENT_INSTRUCTIONS_PATH);
+  return {
+    version: 1,
+    root,
+    ok: issues.length === 0,
+    instructions,
+    issues,
+  };
 }
 
-export async function syncAgentSkills(
-  root: string,
-): Promise<AgentSkillSyncResult> {
-  return withWorkspaceLock(root, async () => {
-    const source = await loadAgentSkillSource();
-    const skill = requireCurrentAgentSkill(source);
-    const instructionsSource = await loadAgentInstructionsSource();
-    const config = await loadConfig(root);
-    if (
-      config.agentSkillVersion !== undefined &&
-      config.agentSkillVersion > skill.version
-    ) {
+async function planIntegrationVersion(root: string): Promise<ManagedFilePlan> {
+  await assertSafeManagedParents(root, INTEGRATION_PATH, instructionsConflict);
+  const target = path.join(root, INTEGRATION_PATH);
+  let previous: string | undefined;
+  try {
+    const info = await lstat(target);
+    if (!info.isFile() || info.isSymbolicLink())
+      throw instructionsConflict(root, target);
+    previous = await readFile(target, "utf8");
+    let metadata: { schema?: unknown; version?: unknown } | null;
+    try {
+      metadata = JSON.parse(previous);
+    } catch {
       throw new WorkspaceError(
-        `Workspace Agent Skill version ${config.agentSkillVersion} is newer than this CLI supports (${skill.version}). Update the CLI before syncing.`,
-        "AIO-SKILL-VERSION",
+        `Invalid JSON in ${INTEGRATION_PATH}.`,
+        "AIO-INTEGRATION-FORMAT",
       );
     }
+    if (
+      metadata?.schema !== 1 ||
+      typeof metadata.version !== "number" ||
+      !Number.isInteger(metadata.version) ||
+      metadata.version < 1
+    ) {
+      throw new WorkspaceError(
+        "Invalid integration metadata.",
+        "AIO-INTEGRATION-FORMAT",
+      );
+    }
+    if (metadata.version > INTEGRATION_VERSION) {
+      throw new WorkspaceError(
+        "Integration is newer than this CLI. Update the CLI before syncing.",
+        "AIO-INTEGRATION-VERSION",
+      );
+    }
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+  }
+  const next = `${JSON.stringify({ schema: 1, version: INTEGRATION_VERSION }, null, 2)}\n`;
+  return {
+    relativePath: INTEGRATION_PATH,
+    target,
+    previous,
+    next,
+    write: previous !== next,
+  };
+}
 
-    const skillPlan = await planAgentSkillTargets(root, source);
+export async function syncAgentIntegration(
+  root: string,
+): Promise<IntegrationSyncResult> {
+  return withWorkspaceLock(root, async () => {
+    await loadConfig(root);
+    const versionPlan = await planIntegrationVersion(root);
     const instructionsPlan = await planAgentInstructionsTarget(
       root,
-      instructionsSource,
-      config.agentSkillVersion !== undefined,
+      await loadAgentInstructionsSource(),
+      versionPlan.previous !== undefined,
     );
-    const hookPlan = await planAgentHookTargets(root);
-    const plan = [...skillPlan, instructionsPlan, ...hookPlan];
-    const configPath = path.join(root, CONFIG_PATH);
-    const previousConfig = await readFile(configPath, "utf8");
-    const nextConfig = workspaceConfigSchema.parse({
-      ...config,
-      agentSkillVersion: skill.version,
-    });
-    const writeConfig = config.agentSkillVersion !== skill.version;
-    await applyAgentIntegrationState(
-      root,
-      plan,
-      previousConfig,
-      stringifyYaml(nextConfig, { lineWidth: 0 }),
-      writeConfig,
-    );
-
-    const changes: AgentSkillChange[] = plan
-      .filter((target) => target.write)
-      .map((target) => ({
-        path: relative(root, target.target),
-        action: target.previous === undefined ? "created" : "updated",
-      }));
-    if (writeConfig) {
-      changes.push({ path: CONFIG_PATH, action: "updated" });
-    }
-    return { version: skill.version, changes };
+    const plan = [
+      versionPlan,
+      instructionsPlan,
+      ...(await planAgentHookTargets(root)),
+    ];
+    await applyAgentIntegrationState(root, plan, undefined, "", false);
+    return {
+      version: INTEGRATION_VERSION,
+      changes: plan
+        .filter((item) => item.write)
+        .map((item) => ({
+          path: item.relativePath,
+          action:
+            item.previous === undefined
+              ? ("created" as const)
+              : ("updated" as const),
+        })),
+    };
   });
 }
 
@@ -540,21 +488,9 @@ export async function createWork(
       created: today,
       updated: today,
       needs: [],
-      checks: {
-        scope: false,
-        completion: false,
-        verification: false,
-        outcome: false,
-        knowledge: false,
-      },
     });
 
-    const staging = path.join(
-      root,
-      ".aiongside",
-      "staging",
-      `${id}-${randomUUID()}`,
-    );
+    const staging = path.join(root, STAGING_DIR, `${id}-${randomUUID()}`);
     const destination = path.join(root, WORK_DIR, id);
     const [recordTemplate, overviewTemplate] = await Promise.all([
       readWorkspaceTemplate(root, "record"),
@@ -562,6 +498,11 @@ export async function createWork(
     ]);
     const recordSource = createRecordDocument(metadata, recordTemplate);
     const recordBodyDigest = calculateMarkdownBodyDigest(recordSource);
+    await assertSafeManagedParents(
+      root,
+      relative(root, staging),
+      internalConflict,
+    );
     await mkdir(staging, { recursive: true });
     let moved = false;
     try {
@@ -601,7 +542,7 @@ export async function moveWork(
 ): Promise<MoveWorkResult> {
   if (!isMovableStatus(targetStatus)) {
     throw new WorkspaceError(
-      `Cannot move work item to status: ${targetStatus}`,
+      `Cannot move work item to status: ${targetStatus}. Allowed: inbox, active, waiting, done, cancelled.`,
       "AIO-WORK-STATUS",
     );
   }
@@ -617,17 +558,11 @@ export async function moveWork(
     );
     const context = await loadMoveContext(root, id);
     const preview = await buildMoveResult(
-      root,
       context.works,
       context.loaded,
-      context.knowledgeEntries,
       targetStatus,
       options,
     );
-    const legacySealMigration =
-      preview.from === "done" &&
-      preview.to === "done" &&
-      preview.metadata.completionSeal === null;
     if (preview.missingInputs.length > 0) {
       const missing = preview.missingInputs[0];
       if (!missing) {
@@ -641,7 +576,7 @@ export async function moveWork(
         missing.code,
       );
     }
-    if (preview.from === preview.to && !legacySealMigration) {
+    if (preview.from === preview.to) {
       return preview;
     }
 
@@ -676,17 +611,7 @@ export async function moveWork(
     let record = workMetadataSchema.parse({
       ...context.loaded.metadata,
       status: targetStatus,
-      updated: legacySealMigration
-        ? context.loaded.metadata.updated
-        : isoToday(),
-      checks: preview.invalidatesCompletion
-        ? {
-            ...context.loaded.metadata.checks,
-            verification: false,
-            outcome: false,
-            knowledge: false,
-          }
-        : context.loaded.metadata.checks,
+      updated: isoToday(),
       transitions: transition
         ? [...context.loaded.metadata.transitions, transition]
         : context.loaded.metadata.transitions,
@@ -756,12 +681,26 @@ export async function moveWork(
 
     return {
       ...preview,
-      changes: legacySealMigration
-        ? ["Create the initial completion seal."]
-        : preview.changes,
       canMove: true,
       applied: true,
       metadata: record,
+      ...(targetStatus === "done"
+        ? {
+            postActions: [
+              {
+                kind: "knowledge-update" as const,
+                workId: record.id,
+                message: `Work completed. Read work/${record.id}/record.md and its deliverables. Read knowledge/index.md and follow only relevant paths. Use aiongside knowledge list or show to resolve document keys when needed. Compare the Work results with existing Knowledge. If reusable results need to be added or corrected, update an existing document or create one with aiongside knowledge new <key>, then write the content without duplicating existing material. If files or folders were added, moved, or removed, update the affected index.md routing links and related document links. Keep knowledge content in individual documents, not indexes. After incorporating the Work results, record the contribution with aiongside work knowledge add ${record.id} <key> only if that relationship is absent. Do not add relationships for reference-only topics. If no update is needed, no further action is required; do not add relationships merely to mark the Work complete. The CLI does not edit Knowledge content or verify incorporation.`,
+                targets: context.knowledgeEntries
+                  .filter((entry) => record.knowledge.includes(entry.key))
+                  .map((entry) => ({
+                    key: entry.key,
+                    path: entry.path,
+                  })),
+              },
+            ],
+          }
+        : {}),
     };
   });
 }
@@ -774,46 +713,12 @@ export async function previewMoveWork(
 ): Promise<MoveWorkResult> {
   if (!isMovableStatus(targetStatus)) {
     throw new WorkspaceError(
-      `Cannot move work item to status: ${targetStatus}`,
+      `Cannot move work item to status: ${targetStatus}. Allowed: inbox, active, waiting, done, cancelled.`,
       "AIO-WORK-STATUS",
     );
   }
   const context = await loadMoveContext(root, id);
-  return buildMoveResult(
-    root,
-    context.works,
-    context.loaded,
-    context.knowledgeEntries,
-    targetStatus,
-    options,
-  );
-}
-
-export async function confirmWork(
-  root: string,
-  id: string,
-  checks: string[],
-): Promise<WorkMetadata> {
-  const normalized = [...new Set(checks.map((check) => check.toLowerCase()))];
-  if (normalized.length === 0) {
-    throw new WorkspaceError("Confirm at least one check.", "AIO-WORK-CHECK");
-  }
-  for (const check of normalized) {
-    if (!isWorkCheck(check)) {
-      throw new WorkspaceError(
-        `Unknown work check: ${check}`,
-        "AIO-WORK-CHECK",
-      );
-    }
-  }
-
-  return updateWork(root, id, (metadata) => {
-    const nextChecks = { ...metadata.checks };
-    for (const check of normalized as WorkCheck[]) {
-      nextChecks[check] = true;
-    }
-    return { ...metadata, checks: nextChecks };
-  });
+  return buildMoveResult(context.works, context.loaded, targetStatus, options);
 }
 
 export async function syncWorkOverview(
@@ -822,15 +727,49 @@ export async function syncWorkOverview(
 ): Promise<SyncOverviewResult> {
   return withWorkspaceLock(root, async () => {
     const normalizedId = id.trim().toUpperCase();
-    await assertMutationSafe(
-      root,
-      ["AIO-OVERVIEW-STALE"],
-      (issue) =>
-        issue.code === "AIO-DONE-INVALIDATED" &&
-        issueTouchesWork(issue, normalizedId),
-    );
-    const loaded = requireWork(await listWorks(root), normalizedId);
+    // Sync records one body digest; workspace health remains check's responsibility.
+    if (!workMetadataSchema.shape.id.safeParse(normalizedId).success) {
+      throw new WorkspaceError(
+        `Invalid work ID: ${normalizedId}`,
+        "AIO-IDENTITY-FORMAT",
+      );
+    }
+    const configPath = path.join(root, CONFIG_PATH);
+    await assertSyncFile(root, configPath, "AIO-CONFIG-READ");
+    const config = await loadConfig(root);
+    const directory = path.join(root, WORK_DIR, normalizedId);
+    if ((await safePathKind(root, directory)) === "missing") {
+      throw new WorkspaceError(
+        `Work not found: ${normalizedId}`,
+        "AIO-WORK-NOT-FOUND",
+      );
+    }
+    const recordPath = path.join(directory, RECORD_NAME);
+    await assertSyncFile(root, recordPath, "AIO-STRUCTURE-RECORD");
+    const source = await readFile(recordPath, "utf8");
+    let record: WorkMetadata;
+    try {
+      record = workMetadataSchema.parse(parseMarkdownDocument(source).metadata);
+    } catch (error) {
+      throw new WorkspaceError(
+        `Invalid Record metadata: ${errorMessage(error)}`,
+        "AIO-SCHEMA-RECORD",
+      );
+    }
+    if (record.id !== normalizedId) {
+      throw new WorkspaceError(
+        `Record ID does not match directory: ${normalizedId}`,
+        "AIO-IDENTITY-DIRECTORY",
+      );
+    }
+    if (!record.id.startsWith(`${config.idPrefix}-`)) {
+      throw new WorkspaceError(
+        `Record ID does not match workspace prefix: ${record.id}`,
+        "AIO-IDENTITY-PREFIX",
+      );
+    }
     const overviewPath = path.join(root, WORK_DIR, normalizedId, OVERVIEW_NAME);
+    await assertSyncFile(root, overviewPath, "AIO-STRUCTURE-OVERVIEW");
     let overviewSource: string;
     let document: ReturnType<typeof parseMarkdownDocument>;
     try {
@@ -850,7 +789,19 @@ export async function syncWorkOverview(
       );
     }
     const overview = parsedOverview.data;
-    const recordBodyDigest = calculateMarkdownBodyDigest(loaded.source);
+    if (overview.id !== record.id) {
+      throw new WorkspaceError(
+        `Overview ID does not match Record: ${record.id}`,
+        "AIO-IDENTITY-OVERVIEW",
+      );
+    }
+    if (overview.title !== record.title) {
+      throw new WorkspaceError(
+        `Overview title does not match Record: ${record.id}`,
+        "AIO-IDENTITY-OVERVIEW-TITLE",
+      );
+    }
+    const recordBodyDigest = calculateMarkdownBodyDigest(source);
     const result = {
       id: normalizedId,
       changed: overview.recordBodyDigest !== recordBodyDigest,
@@ -862,7 +813,7 @@ export async function syncWorkOverview(
     await atomicWrite(
       overviewPath,
       replaceMarkdownMetadata(overviewSource, {
-        ...overview,
+        ...(document.metadata as Record<string, unknown>),
         recordBodyDigest,
       }),
     );
@@ -870,12 +821,17 @@ export async function syncWorkOverview(
   });
 }
 
-export async function cancelWork(
+async function assertSyncFile(
   root: string,
-  id: string,
-  options: MoveWorkOptions = {},
-): Promise<MoveWorkResult> {
-  return moveWork(root, id, "cancelled", options);
+  target: string,
+  code: string,
+): Promise<void> {
+  if ((await safePathKind(root, target)) !== "file") {
+    throw new WorkspaceError(
+      `Sync requires a safe regular file: ${relative(root, target)}`,
+      code,
+    );
+  }
 }
 
 export async function addWorkDependency(
@@ -947,7 +903,7 @@ export async function removeWorkDependency(
       (issue) =>
         issue.code !== "AIO-STRUCTURE-VIEW" &&
         issue.code !== "AIO-VIEW-DRIFT" &&
-        issue.code !== "AIO-KNOWLEDGE-STALE" &&
+        !ROUTING_CODES.some((code) => code === issue.code) &&
         !DEPENDENCY_RELATION_CODES.has(issue.code),
     );
     if (blocking) {
@@ -1052,7 +1008,6 @@ export async function addWorkKnowledge(
       ...loaded.metadata,
       updated: isoToday(),
       knowledge: [...loaded.metadata.knowledge, normalizedKey],
-      checks: { ...loaded.metadata.checks, knowledge: false },
     });
     await writeWorkMetadataMutation(root, works, loaded, record);
     return {
@@ -1099,7 +1054,6 @@ export async function removeWorkKnowledge(
       knowledge: loaded.metadata.knowledge.filter(
         (candidate) => candidate !== normalizedKey,
       ),
-      checks: { ...loaded.metadata.checks, knowledge: false },
     });
     await writeWorkMetadataMutation(root, works, loaded, record);
     return {
@@ -1135,7 +1089,7 @@ export async function previewDiscard(
     id: normalizedId,
     files: await listRelativeFiles(root, workPath),
     referencedBy,
-    trashTarget: `.aiongside/trash/${normalizedId}-<timestamp>`,
+    trashTarget: `${TRASH_DIR}/${normalizedId}-<timestamp>`,
   };
 }
 
@@ -1162,11 +1116,11 @@ export async function discardWork(
     }
     const source = path.join(root, WORK_DIR, normalizedId);
     const timestamp = new Date().toISOString().replaceAll(/[:.]/g, "-");
-    const target = path.join(
+    const target = path.join(root, TRASH_DIR, `${normalizedId}-${timestamp}`);
+    await assertSafeManagedParents(
       root,
-      ".aiongside",
-      "trash",
-      `${normalizedId}-${timestamp}`,
+      relative(root, target),
+      internalConflict,
     );
     await rename(source, target);
     try {
@@ -1205,10 +1159,6 @@ export async function validateWorkspace(
     return issues;
   }
 
-  issues.push(...(await validateWorkspaceTemplates(root)));
-  if (config.agentSkillVersion !== undefined) {
-    issues.push(...(await validateManagedAgentSkills(root, config)));
-  }
   const knowledge = await validateKnowledgeStructure(root);
   issues.push(...knowledge.issues);
 
@@ -1346,7 +1296,7 @@ export async function validateWorkspace(
           code: "AIO-DONE-INVALIDATED",
           path: workFieldPath(loaded.metadata.id, "completionSeal"),
           message: "Done work is missing a completion seal.",
-          hint: `Run \`aiongside work move ${loaded.metadata.id} done\` to create the initial seal after reviewing the work.`,
+          hint: `Run \`aiongside work move ${loaded.metadata.id} active --reopen-reason <reason>\`, then complete it again to create a new seal.`,
         });
         continue;
       }
@@ -1356,7 +1306,6 @@ export async function validateWorkspace(
         loaded.metadata.id,
         loaded.metadata,
         document.body,
-        { includeKnowledge: hasOwnField(document.metadata, "knowledge") },
       );
       if (digest !== loaded.metadata.completionSeal.digest) {
         issues.push({
@@ -1368,6 +1317,9 @@ export async function validateWorkspace(
       }
     }
   }
+  issues.push(
+    ...(await validateDocumentLinks(root, await workMarkdownDocuments(root))),
+  );
   issues.push(...(await validateViews(root, viewMetadata, canCompareViews)));
   return issues;
 }
@@ -1393,10 +1345,8 @@ async function loadMoveContext(
 }
 
 async function buildMoveResult(
-  root: string,
   works: LoadedWork[],
   loaded: LoadedWork,
-  knowledgeEntries: KnowledgeEntry[],
   targetStatus: WorkStatus,
   options: MoveWorkOptions,
 ): Promise<MoveWorkResult> {
@@ -1408,38 +1358,20 @@ async function buildMoveResult(
       code: "AIO-TRANSITION-INPUT",
     }),
   );
-  const legacySealMigration =
-    loaded.metadata.status === "done" &&
+  if (
+    rule.noOp &&
     targetStatus === "done" &&
-    loaded.metadata.completionSeal === null;
-
-  if (rule.requirements.includes("D") || legacySealMigration) {
-    const knowledgeQuestion =
-      loaded.metadata.knowledge.length === 0
-        ? "Has it been confirmed that this work has no lasting Knowledge impact?"
-        : "Have the linked Knowledge topics been reviewed and updated where needed?";
-    const checkQuestions: Record<WorkCheck, string> = {
-      scope: "Has the current work scope been reviewed?",
-      completion: "Have the completion criteria been met?",
-      verification: "What verification was performed and what was observed?",
-      outcome: "Has the outcome been recorded?",
-      knowledge: knowledgeQuestion,
-    };
-    for (const check of [
-      "scope",
-      "completion",
-      "verification",
-      "outcome",
-      "knowledge",
-    ] as const) {
-      requiredInputs.push({
-        key: `checks.${check}`,
-        source: "record",
-        question: checkQuestions[check],
-        code: "AIO-STATE-GATE",
-        hint: `Run \`aiongside work confirm ${loaded.metadata.id} ${check}\` after reviewing the Record.`,
-      });
-    }
+    loaded.metadata.completionSeal === null
+  ) {
+    requiredInputs.push({
+      key: "completionSeal",
+      source: "record",
+      code: "AIO-DONE-INVALIDATED",
+      question: "Done work is missing a completion seal.",
+      hint: `Run aiongside work move ${loaded.metadata.id} active --reopen-reason <reason>, then complete it again.`,
+    });
+  }
+  if (rule.requirements.includes("D")) {
     const byId = new Map(
       works.map((work) => [work.metadata.id, work.metadata]),
     );
@@ -1457,31 +1389,10 @@ async function buildMoveResult(
     }
   }
 
-  const knowledgeReview =
-    (rule.requirements.includes("D") || legacySealMigration) &&
-    !(rule.noOp && !legacySealMigration)
-      ? await resolveKnowledgeReview(root, loaded.metadata, knowledgeEntries)
-      : undefined;
-  for (const target of knowledgeReview?.targets ?? []) {
-    if (!target.fresh) {
-      requiredInputs.push({
-        key: `knowledgeFresh.${target.key}`,
-        source: "record",
-        question: `Knowledge ${target.key} is stale at ${target.overview}.`,
-        code: "AIO-KNOWLEDGE-STALE",
-        hint: `Review it and run \`aiongside knowledge sync ${target.key}\` before completion.`,
-      });
-    }
-  }
-
   const missingInputs = requiredInputs.filter((input) => {
     if (input.source === "option") {
       const value = options[input.key as keyof TransitionInputValues];
       return !value?.trim();
-    }
-    if (input.key.startsWith("checks.")) {
-      const check = input.key.slice("checks.".length) as WorkCheck;
-      return !loaded.metadata.checks[check];
     }
     if (input.key.startsWith("needs.")) {
       const dependencyId = input.key.slice("needs.".length);
@@ -1511,12 +1422,8 @@ async function buildMoveResult(
   if (targetStatus === "done" && rule.from !== "done") {
     changes.push("Create a completion seal for the current work content.");
   }
-  if (legacySealMigration) {
-    changes.push("Create the initial completion seal.");
-  }
   if (rule.invalidatesCompletion) {
     changes.push("Invalidate the existing completion seal.");
-    changes.push("Reset verification, outcome, and knowledge confirmations.");
   }
 
   return {
@@ -1532,35 +1439,7 @@ async function buildMoveResult(
     canMove: missingInputs.length === 0,
     applied: false,
     metadata: loaded.metadata,
-    ...(knowledgeReview ? { knowledgeReview } : {}),
   };
-}
-
-async function resolveKnowledgeReview(
-  root: string,
-  metadata: WorkMetadata,
-  entries: KnowledgeEntry[],
-): Promise<KnowledgeReview> {
-  const byKey = knowledgeEntriesByKey(entries);
-  const targets = await Promise.all(
-    metadata.knowledge.map(async (key) => {
-      const entry = byKey.get(key);
-      if (!entry) {
-        throw new WorkspaceError(
-          `Knowledge key does not exist: ${key}`,
-          "AIO-WORK-KNOWLEDGE-MISSING",
-        );
-      }
-      const status = await inspectKnowledgeOverview(root, entry, entries);
-      return {
-        key,
-        path: entry.path,
-        overview: knowledgeOverviewPath(entry),
-        fresh: status.issue === undefined,
-      };
-    }),
-  );
-  return { confirmed: metadata.checks.knowledge, targets };
 }
 
 function findDependentDoneIds(
@@ -1593,7 +1472,6 @@ async function calculateCompletionDigest(
   id: string,
   metadata: WorkMetadata,
   recordBody: string,
-  options: { includeKnowledge?: boolean } = { includeKnowledge: true },
 ): Promise<string> {
   const hash = createHash("sha256");
   const stableMetadata = {
@@ -1601,12 +1479,7 @@ async function calculateCompletionDigest(
     id: metadata.id,
     title: metadata.title,
     type: metadata.type,
-    created: metadata.created,
     needs: metadata.needs,
-    ...(options.includeKnowledge === false
-      ? {}
-      : { knowledge: metadata.knowledge }),
-    checks: metadata.checks,
   };
   hash.update("record-metadata\0");
   hash.update(JSON.stringify(stableMetadata));
@@ -1617,115 +1490,17 @@ async function calculateCompletionDigest(
   const recordPath = `${WORK_DIR}/${id}/${RECORD_NAME}`;
   const files = await listRelativeFiles(root, workPath);
   for (const file of files.sort()) {
-    if (file === recordPath) {
+    if (file === recordPath || file === `${WORK_DIR}/${id}/${OVERVIEW_NAME}`) {
       continue;
     }
     hash.update(`\0${file}\0`);
-    if (isSupportingContentFile(file, id)) {
-      hash.update(await readFile(path.join(root, file)));
-    } else {
-      hash.update(
-        normalizeCompletionText(await readFile(path.join(root, file), "utf8")),
-      );
-    }
+    hash.update(await readFile(path.join(root, file)));
   }
   return hash.digest("hex");
 }
 
-function hasOwnField(value: unknown, field: string): boolean {
-  return (
-    typeof value === "object" && value !== null && Object.hasOwn(value, field)
-  );
-}
-
-function isSupportingContentFile(file: string, id: string): boolean {
-  return SUPPORTING_CONTENT_DIRECTORIES.some(({ name }) =>
-    file.startsWith(`${WORK_DIR}/${id}/${name}/`),
-  );
-}
-
 function normalizeCompletionText(source: string): string {
   return `${source.replaceAll("\r\n", "\n").trimEnd()}\n`;
-}
-
-async function updateWork(
-  root: string,
-  id: string,
-  update: (record: WorkMetadata) => WorkMetadata,
-  options: { enforceState?: boolean } = {},
-): Promise<WorkMetadata> {
-  return withWorkspaceLock(root, async () => {
-    await assertMutationSafe(root, [
-      "AIO-STATE-GATE",
-      "AIO-DEPENDENCY-BLOCKED",
-      "AIO-DONE-INVALIDATED",
-    ]);
-    const normalizedId = id.trim().toUpperCase();
-    const works = await listWorks(root);
-    const loaded = works.find((work) => work.metadata.id === normalizedId);
-    if (!loaded) {
-      throw new WorkspaceError(
-        `Cannot find work item: ${normalizedId}`,
-        "AIO-WORK-NOT-FOUND",
-      );
-    }
-    const record = workMetadataSchema.parse({
-      ...update(loaded.metadata),
-      updated: isoToday(),
-    });
-    if (options.enforceState) {
-      const byId = new Map(
-        works.map((work) => [work.metadata.id, work.metadata]),
-      );
-      byId.set(record.id, record);
-      const issue = validateWorkState(record, byId)[0];
-      if (issue) {
-        throw new WorkspaceError(
-          `${issue.message}${issue.hint ? ` ${issue.hint}` : ""}`,
-          issue.code,
-        );
-      }
-    }
-    const document = parseMarkdownDocument(loaded.source);
-    const recordPath = path.join(root, WORK_DIR, normalizedId, RECORD_NAME);
-    await atomicWrite(
-      recordPath,
-      formatMarkdownDocument(record, document.body),
-    );
-    let createdPlan = false;
-    if (record.status === "active") {
-      const planPath = path.join(root, WORK_DIR, normalizedId, "plan.md");
-      if (!(await pathExists(planPath))) {
-        const planTemplate = await readWorkspaceTemplate(root, "plan");
-        await atomicWrite(
-          planPath,
-          createPlanDocument(planTemplate, record.title),
-        );
-        createdPlan = true;
-      }
-    }
-    try {
-      await writeViews(
-        root,
-        works.map((work) =>
-          work.metadata.id === normalizedId ? record : work.metadata,
-        ),
-      );
-      return record;
-    } catch (error) {
-      await atomicWrite(recordPath, loaded.source);
-      if (createdPlan) {
-        await rm(path.join(root, WORK_DIR, normalizedId, "plan.md"), {
-          force: true,
-        });
-      }
-      await writeViews(
-        root,
-        works.map((work) => work.metadata),
-      );
-      throw error;
-    }
-  });
 }
 
 function requireWork(works: LoadedWork[], id: string): LoadedWork {
@@ -1749,10 +1524,10 @@ function assertDependencyMutable(metadata: WorkMetadata): void {
 }
 
 function assertKnowledgeMutable(metadata: WorkMetadata): void {
-  if (metadata.status === "done") {
+  if (metadata.status !== "done") {
     throw new WorkspaceError(
-      `Reopen ${metadata.id} before changing Knowledge relationships.`,
-      "AIO-DONE-SEALED",
+      `Complete ${metadata.id} before changing Knowledge relationships.`,
+      "AIO-WORK-KNOWLEDGE-STATUS",
     );
   }
 }
@@ -1787,179 +1562,108 @@ export async function createKnowledge(
 ): Promise<CreateKnowledgeResult> {
   return withWorkspaceLock(root, async () => {
     await assertMutationSafe(root);
-    const registry = await loadKnowledgeRegistry(root);
-    const plan = resolveKnowledgePlan(() =>
-      planKnowledgeCreate(registry.entries, input),
-    );
-    const entry = plan.entry;
-    const knowledgeRoot = path.join(root, "knowledge");
-    const destination = path.join(knowledgeRoot, ...entry.path.split("/"));
-    await assertKnowledgePathSafe(
-      knowledgeRoot,
-      entry.path,
-      "AIO-KNOWLEDGE-CREATE-CONFLICT",
-      true,
-    );
-    const targetState = await inspectPath(destination);
-    if (targetState === "other" || targetState === "symlink") {
+    const entries = await loadKnowledgeEntries(root);
+    const key = normalizeKnowledgeKey(input.key);
+    const filePath = normalizeKnowledgePath(input.path ?? `${key}.md`);
+    if (entries.some((entry) => entry.key === key))
       throw new WorkspaceError(
-        `Knowledge path conflicts with a non-directory entry: knowledge/${entry.path}`,
+        `Knowledge key already exists: ${key}. Choose a unique key; existing documents were not changed.`,
         "AIO-KNOWLEDGE-CREATE-CONFLICT",
       );
-    }
-    const adopted = targetState === "directory";
-    const overviewPath = path.join(destination, OVERVIEW_NAME);
-    const overviewState = adopted ? await inspectPath(overviewPath) : "missing";
-    if (overviewState !== "missing" && overviewState !== "file") {
-      throw new WorkspaceError(
-        `Knowledge Overview conflicts with an existing entry: knowledge/${entry.path}/${OVERVIEW_NAME}`,
-        "AIO-KNOWLEDGE-CREATE-CONFLICT",
-      );
-    }
-
-    const previousRegistry = registry.source;
-    const nextRegistry = renderKnowledgeRegistry(
-      previousRegistry,
-      plan.entries,
+    const source = createKnowledgeDocument({ ...input, key });
+    await assertKnowledgeFilePath(root, filePath, true);
+    const target = path.join(root, "knowledge", filePath);
+    const createdDirectories = await missingDirectoryChain(
+      path.join(root, "knowledge"),
+      path.dirname(target),
     );
-    const createdParents = await missingDirectoryChain(
-      knowledgeRoot,
-      path.dirname(destination),
-    );
-    let createdDirectory = false;
-    let createdOverview = false;
-    let staleKeys: string[] = [];
+    const createdIndexes: string[] = [];
+    let written = false;
     try {
-      await mkdir(destination, { recursive: true });
-      createdDirectory = !adopted;
-      if (overviewState === "missing") {
-        const body = `# ${entry.displayName}\n`;
-        const source = adopted
-          ? body
-          : formatKnowledgeOverviewDocument(body, {
-              schema: 1,
-              key: entry.key,
-              contentDigest: await calculateKnowledgeContentDigest(
-                root,
-                entry,
-                plan.entries,
-              ),
-            });
-        await atomicWrite(overviewPath, source);
-        createdOverview = true;
-      }
-      await atomicWrite(registry.path, nextRegistry);
-      staleKeys = await collectStaleKnowledgeKeys(root, plan.entries);
+      await mkdir(path.dirname(target), { recursive: true });
+      await createMissingIndexes(root, filePath, createdIndexes);
+      await atomicWrite(target, source);
+      written = true;
+      return {
+        ...knowledgeInfo({
+          key,
+          path: filePath,
+          displayName: input.displayName?.trim() || key,
+        }),
+        changes: [
+          ...createdDirectories.reverse().map((item) => relative(root, item)),
+          ...createdIndexes.map((item) => relative(root, item)),
+          `knowledge/${filePath}`,
+        ],
+        indexPaths: knowledgeIndexPaths(filePath),
+      };
     } catch (error) {
-      await restoreCreatedKnowledgePath({
-        destination,
-        overviewPath,
-        createdDirectory,
-        createdOverview,
-        createdParents,
-      });
-      if ((await readOptionalFile(registry.path)) !== previousRegistry) {
-        await atomicWrite(registry.path, previousRegistry);
-      }
+      if (written) await rm(target, { force: true });
+      for (const index of createdIndexes) await rm(index, { force: true });
+      await removeEmptyDirectories(
+        createdDirectories.sort((a, b) => b.length - a.length),
+      );
       throw error;
     }
-    return {
-      key: entry.key,
-      path: entry.path,
-      parent: entry.parent ?? null,
-      displayName: entry.displayName,
-      overview: knowledgeOverviewPath(entry),
-      fresh: !staleKeys.includes(entry.key),
-      adopted,
-      changes: [
-        `knowledge/registry.md#${entry.key}`,
-        ...(createdDirectory ? [`knowledge/${entry.path}/`] : []),
-        ...(createdOverview ? [knowledgeOverviewPath(entry)] : []),
-      ],
-      staleKeys,
-    };
   });
 }
 
 export async function previewMoveKnowledge(
   root: string,
   key: string,
-  destinationPath: string,
-  options: MoveKnowledgeOptions = {},
+  destination: string,
 ): Promise<MoveKnowledgeResult> {
   await assertMutationSafe(root);
-  const registry = await loadKnowledgeRegistry(root);
-  const plan = resolveKnowledgePlan(() =>
-    planKnowledgeMove(registry.entries, {
-      key,
-      path: destinationPath,
-      ...(options.parent !== undefined ? { parent: options.parent } : {}),
-      preserveParent: options.preserveParent ?? options.parent === undefined,
-    }),
-  );
-  await assertMovePathsSafe(root, plan.sourcePath, plan.destinationPath);
+  const entry = await showKnowledge(root, key);
+  const destinationPath = normalizeKnowledgePath(destination);
+  await assertKnowledgeFilePath(root, entry.path, false);
+  if (entry.path !== destinationPath)
+    await assertKnowledgeFilePath(root, destinationPath, true);
   return {
-    ...plan,
+    key: entry.key,
+    sourcePath: entry.path,
+    destinationPath,
+    indexPaths: [
+      ...new Set([
+        ...knowledgeIndexPaths(entry.path),
+        ...knowledgeIndexPaths(destinationPath),
+      ]),
+    ],
+    warnings: [
+      "Document links and indexes are not rewritten. Work key relationships are preserved.",
+    ],
     applied: false,
-    overview: `knowledge/${plan.destinationPath}/${OVERVIEW_NAME}`,
   };
 }
 
 export async function moveKnowledge(
   root: string,
   key: string,
-  destinationPath: string,
-  options: MoveKnowledgeOptions = {},
+  destination: string,
 ): Promise<MoveKnowledgeResult> {
   return withWorkspaceLock(root, async () => {
-    await assertMutationSafe(root);
-    const registry = await loadKnowledgeRegistry(root);
-    const plan = resolveKnowledgePlan(() =>
-      planKnowledgeMove(registry.entries, {
-        key,
-        path: destinationPath,
-        ...(options.parent !== undefined ? { parent: options.parent } : {}),
-        preserveParent: options.preserveParent ?? options.parent === undefined,
-      }),
-    );
-    await assertMovePathsSafe(root, plan.sourcePath, plan.destinationPath);
-    const source = path.join(root, "knowledge", ...plan.sourcePath.split("/"));
-    const destination = path.join(
-      root,
-      "knowledge",
-      ...plan.destinationPath.split("/"),
-    );
-    const previousRegistry = registry.source;
-    const nextRegistry = renderKnowledgeRegistry(
-      previousRegistry,
-      plan.entries,
-    );
-    const createdParents = await missingDirectoryChain(
+    const result = await previewMoveKnowledge(root, key, destination);
+    if (result.sourcePath === result.destinationPath) return result;
+    const source = path.join(root, "knowledge", result.sourcePath);
+    const target = path.join(root, "knowledge", result.destinationPath);
+    const createdDirectories = await missingDirectoryChain(
       path.join(root, "knowledge"),
-      path.dirname(destination),
+      path.dirname(target),
     );
+    const createdIndexes: string[] = [];
     let moved = false;
-    let staleKeys: string[] = [];
     try {
-      await mkdir(path.dirname(destination), { recursive: true });
-      await rename(source, destination);
+      await mkdir(path.dirname(target), { recursive: true });
+      await createMissingIndexes(root, result.destinationPath, createdIndexes);
+      await rename(source, target);
       moved = true;
-      await atomicWrite(registry.path, nextRegistry);
-      staleKeys = await collectStaleKnowledgeKeys(root, plan.entries);
+      return { ...result, applied: true };
     } catch (error) {
-      if ((await readOptionalFile(registry.path)) !== previousRegistry) {
-        await atomicWrite(registry.path, previousRegistry);
-      }
-      if (moved) await rename(destination, source);
-      await removeEmptyDirectories(createdParents);
+      if (moved) await rename(target, source);
+      for (const index of createdIndexes) await rm(index, { force: true });
+      await removeEmptyDirectories(createdDirectories);
       throw error;
     }
-    return {
-      ...plan,
-      staleKeys,
-      applied: true,
-      overview: `knowledge/${plan.destinationPath}/${OVERVIEW_NAME}`,
-    };
   });
 }
 
@@ -1968,17 +1672,16 @@ export async function previewDiscardKnowledge(
   key: string,
 ): Promise<DiscardKnowledgePreview> {
   await assertMutationSafe(root);
-  const registry = await loadKnowledgeRegistry(root);
-  const works = await listWorks(root);
-  const referencedBy = works
-    .filter((work) =>
-      work.metadata.knowledge.includes(key.trim().toLowerCase()),
-    )
-    .map((work) => work.metadata.id);
-  const plan = resolveKnowledgePlan(() =>
-    planKnowledgeDiscard(registry.entries, key, referencedBy),
-  );
-  return discardKnowledgePreview(plan);
+  const entry = await showKnowledge(root, key);
+  return {
+    key: entry.key,
+    path: entry.path,
+    referencedBy: (await listWorks(root))
+      .filter((work) => work.metadata.knowledge.includes(entry.key))
+      .map((work) => work.metadata.id),
+    trashTarget: `${TRASH_DIR}/knowledge/${entry.key}-<timestamp>/`,
+    indexPaths: knowledgeIndexPaths(entry.path),
+  };
 }
 
 export async function discardKnowledge(
@@ -1986,93 +1689,91 @@ export async function discardKnowledge(
   key: string,
   confirmation: string,
 ): Promise<DiscardKnowledgeResult> {
-  const normalizedKey = key.trim().toLowerCase();
-  if (confirmation.trim() !== normalizedKey) {
+  const normalized = normalizeKnowledgeKey(key);
+  if (confirmation !== normalized)
     throw new WorkspaceError(
-      `Confirmation does not match. Use --confirm ${normalizedKey}.`,
+      "Confirm the exact Knowledge key after inspecting --dry-run.",
       "AIO-KNOWLEDGE-DISCARD-CONFIRM",
     );
-  }
   return withWorkspaceLock(root, async () => {
-    await assertMutationSafe(root);
-    const registry = await loadKnowledgeRegistry(root);
-    const works = await listWorks(root);
-    const referencedBy = works
-      .filter((work) => work.metadata.knowledge.includes(normalizedKey))
-      .map((work) => work.metadata.id);
-    const plan = resolveKnowledgePlan(() =>
-      planKnowledgeDiscard(registry.entries, normalizedKey, referencedBy),
-    );
-    if (plan.childKeys.length > 0) {
+    const preview = await previewDiscardKnowledge(root, normalized);
+    if (preview.referencedBy.length)
       throw new WorkspaceError(
-        `Cannot discard Knowledge with registered children: ${plan.childKeys.join(", ")}`,
-        "AIO-KNOWLEDGE-DISCARD-CHILDREN",
-      );
-    }
-    if (plan.referencedBy.length > 0) {
-      throw new WorkspaceError(
-        `Cannot discard Knowledge referenced by Work: ${plan.referencedBy.join(", ")}`,
+        `Cannot discard Knowledge referenced by Work: ${preview.referencedBy.join(", ")}`,
         "AIO-KNOWLEDGE-DISCARD-REFERENCED",
       );
-    }
-    const source = path.join(root, "knowledge", ...plan.entry.path.split("/"));
-    await assertKnowledgePathSafe(
-      path.join(root, "knowledge"),
-      plan.entry.path,
-      "AIO-KNOWLEDGE-CREATE-CONFLICT",
-      false,
+    await assertKnowledgeFilePath(root, preview.path, false);
+    const trash = `${TRASH_DIR}/knowledge/${normalized}-${new Date().toISOString().replaceAll(/[:.]/g, "-")}-${randomUUID()}`;
+    await assertSafeManagedParents(
+      root,
+      `${trash}/content.md`,
+      internalConflict,
     );
-    const timestamp = new Date().toISOString().replaceAll(/[:.]/g, "-");
-    const trashRelative = `.aiongside/trash/knowledge/${plan.entry.key}-${timestamp}`;
-    const trashEntry = path.join(root, ...trashRelative.split("/"));
-    const content = path.join(trashEntry, "content");
-    const metadataPath = path.join(trashEntry, "recovery.yaml");
-    const previousRegistry = registry.source;
-    const nextEntries = registry.entries.filter(
-      (entry) => entry.key !== plan.entry.key,
-    );
-    const nextRegistry = renderKnowledgeRegistry(previousRegistry, nextEntries);
+    const destination = path.join(root, trash);
+    const source = path.join(root, "knowledge", preview.path);
+    let created = false;
     let moved = false;
-    let staleKeys: string[] = [];
     try {
-      await mkdir(trashEntry, { recursive: true });
-      await rename(source, content);
-      moved = true;
+      await mkdir(destination, { recursive: true });
+      created = true;
       await atomicWrite(
-        metadataPath,
-        stringifyYaml(
-          {
-            schema: 1,
-            key: plan.entry.key,
-            path: plan.entry.path,
-            parent: plan.entry.parent ?? null,
-            displayName: plan.entry.displayName,
-          },
-          { lineWidth: 0 },
-        ),
+        path.join(destination, "recovery.yaml"),
+        stringifyYaml({ key: normalized, path: preview.path }),
       );
-      await atomicWrite(registry.path, nextRegistry);
-      staleKeys = await collectStaleKnowledgeKeys(root, nextEntries);
+      await rename(source, path.join(destination, "content.md"));
+      moved = true;
+      return { ...preview, trashTarget: trash, applied: true };
     } catch (error) {
-      if ((await readOptionalFile(registry.path)) !== previousRegistry) {
-        await atomicWrite(registry.path, previousRegistry);
-      }
-      if (moved) await rename(content, source);
-      await rm(trashEntry, { recursive: true, force: true });
+      if (moved) await rename(path.join(destination, "content.md"), source);
+      if (created) await rm(destination, { recursive: true, force: true });
       throw error;
     }
-    return {
-      ...discardKnowledgePreview(plan, trashRelative),
-      staleKeys,
-      applied: true,
-      registryEntry: {
-        key: plan.entry.key,
-        path: plan.entry.path,
-        parent: plan.entry.parent ?? null,
-        displayName: plan.entry.displayName,
-      },
-    };
   });
+}
+
+function knowledgeIndexPaths(filePath: string): string[] {
+  const parts = filePath.split("/");
+  parts.pop();
+  return [
+    "knowledge/index.md",
+    ...parts.map(
+      (_, i) => `knowledge/${parts.slice(0, i + 1).join("/")}/index.md`,
+    ),
+  ];
+}
+
+async function createMissingIndexes(
+  root: string,
+  filePath: string,
+  created: string[],
+): Promise<void> {
+  for (const index of knowledgeIndexPaths(filePath)) {
+    const target = path.join(root, index);
+    const kind = await safePathKind(root, target);
+    if (kind === "missing") {
+      await atomicWrite(target, INDEX_SOURCE);
+      created.push(target);
+    } else if (kind !== "file")
+      throw new WorkspaceError(
+        `Index must be a regular file: ${index}`,
+        "AIO-KNOWLEDGE-PATH",
+      );
+  }
+}
+
+async function assertKnowledgeFilePath(
+  root: string,
+  filePath: string,
+  creating: boolean,
+): Promise<void> {
+  normalizeKnowledgePath(filePath);
+  const target = path.join(root, "knowledge", filePath);
+  const kind = await safePathKind(root, target);
+  if ((creating && kind !== "missing") || (!creating && kind !== "file"))
+    throw new WorkspaceError(
+      `Knowledge path ${creating ? "already exists or is unsafe" : "is not a regular file"}: knowledge/${filePath}`,
+      creating ? "AIO-KNOWLEDGE-CREATE-CONFLICT" : "AIO-KNOWLEDGE-PATH",
+    );
 }
 
 async function writeWorkMetadataMutation(
@@ -2100,228 +1801,73 @@ async function writeWorkMetadataMutation(
 }
 
 export async function listKnowledge(root: string): Promise<KnowledgeInfo[]> {
-  const entries = await loadKnowledgeEntries(root);
-  const result = await Promise.all(
-    [...entries]
-      .sort((left, right) => left.key.localeCompare(right.key))
-      .map((entry) => buildKnowledgeInfo(root, entry, entries)),
-  );
-  return result;
+  return (await loadKnowledgeEntries(root)).map(knowledgeInfo);
 }
 
 export async function showKnowledge(
   root: string,
   key: string,
 ): Promise<KnowledgeInfo> {
-  const normalizedKey = key.trim().toLowerCase();
-  const entries = await loadKnowledgeEntries(root);
-  const entry = entries.find((candidate) => candidate.key === normalizedKey);
-  if (!entry) {
+  const normalized = normalizeKnowledgeKey(key);
+  const entry = (await loadKnowledgeEntries(root)).find(
+    (item) => item.key === normalized,
+  );
+  if (!entry)
     throw new WorkspaceError(
-      `Knowledge key does not exist: ${normalizedKey}. Check knowledge/registry.md.`,
+      `Knowledge key does not exist: ${normalized}. Run aiongside knowledge list to find current document keys.`,
       "AIO-KNOWLEDGE-NOT-FOUND",
     );
-  }
-  return buildKnowledgeInfo(root, entry, entries);
+  return knowledgeInfo(entry);
 }
 
 export async function getKnowledgeTree(
   root: string,
 ): Promise<KnowledgeTreeNode[]> {
-  const items = await listKnowledge(root);
-  const byParent = new Map<string | null, KnowledgeInfo[]>();
-  for (const item of items) {
-    const siblings = byParent.get(item.parent) ?? [];
-    siblings.push(item);
-    byParent.set(item.parent, siblings);
-  }
-  const build = (parent: string | null): KnowledgeTreeNode[] =>
-    (byParent.get(parent) ?? [])
-      .sort((left, right) => left.key.localeCompare(right.key))
-      .map((item) => ({
-        ...item,
-        children: build(item.key),
-      }));
-  return build(null);
+  const scan = await scanKnowledge(root);
+  const blocking = scan.issues.find(
+    (issue) => !ROUTING_CODES.some((code) => code === issue.code),
+  );
+  if (blocking) throw workspaceInvalidError(blocking);
+  const byPath = new Map(scan.entries.map((entry) => [entry.path, entry]));
+  const visit = async (directory: string): Promise<KnowledgeTreeNode[]> => {
+    const nodes: KnowledgeTreeNode[] = [];
+    for (const item of (await readdir(directory, { withFileTypes: true })).sort(
+      (a, b) => a.name.localeCompare(b.name),
+    )) {
+      const absolute = path.join(directory, item.name);
+      const filePath = relative(path.join(root, "knowledge"), absolute);
+      if (item.isDirectory())
+        nodes.push({
+          type: "directory",
+          path: filePath,
+          displayName: item.name,
+          children: await visit(absolute),
+        });
+      else {
+        const entry = byPath.get(filePath);
+        if (entry) nodes.push({ type: "document", ...entry, children: [] });
+      }
+    }
+    return nodes;
+  };
+  return visit(path.join(root, "knowledge"));
 }
 
-export async function syncKnowledgeOverview(
-  root: string,
-  key: string,
-): Promise<SyncKnowledgeOverviewResult> {
-  return withWorkspaceLock(root, async () => {
-    const normalizedKey = key.trim().toLowerCase();
-    const entries = await loadKnowledgeEntries(root);
-    const entry = entries.find((candidate) => candidate.key === normalizedKey);
-    if (!entry) {
-      throw new WorkspaceError(
-        `Knowledge key does not exist: ${normalizedKey}. Check knowledge/registry.md.`,
-        "AIO-KNOWLEDGE-NOT-FOUND",
-      );
-    }
-    const structuralIssue = (await validateKnowledgeEntrypoint(root, entry))[0];
-    if (structuralIssue) throw workspaceInvalidError(structuralIssue);
-
-    const overview = knowledgeOverviewPath(entry);
-    const target = path.join(root, ...overview.split("/"));
-    const source = await readFile(target, "utf8");
-    let document: ReturnType<typeof parseKnowledgeOverviewDocument>;
-    try {
-      document = parseKnowledgeOverviewDocument(source);
-    } catch (error) {
-      throw new WorkspaceError(
-        `Cannot read Knowledge Overview for ${entry.key}: ${errorMessage(error)}`,
-        "AIO-KNOWLEDGE-OVERVIEW",
-      );
-    }
-    if (document.managed && document.managed.key !== entry.key) {
-      throw new WorkspaceError(
-        `Knowledge Overview key ${document.managed.key} does not match Registry key ${entry.key}: ${overview}`,
-        "AIO-KNOWLEDGE-IDENTITY",
-      );
-    }
-    const contentDigest = await calculateKnowledgeContentDigest(
-      root,
-      entry,
-      entries,
-    );
-    const next = formatKnowledgeOverviewDocument(source, {
-      schema: 1,
-      key: entry.key,
-      contentDigest,
-    });
-    if (next === source) {
-      return {
-        key: entry.key,
-        changed: false,
-        path: entry.path,
-        overview,
-        fresh: true,
-      };
-    }
-    await atomicWrite(target, next);
-    return {
-      key: entry.key,
-      changed: true,
-      path: entry.path,
-      overview,
-      fresh: true,
-    };
-  });
-}
-
-async function buildKnowledgeInfo(
-  root: string,
-  entry: KnowledgeEntry,
-  entries: KnowledgeEntry[],
-): Promise<KnowledgeInfo> {
-  const structuralIssue = (await validateKnowledgeEntrypoint(root, entry))[0];
-  if (structuralIssue) throw workspaceInvalidError(structuralIssue);
-  const status = await inspectKnowledgeOverview(root, entry, entries);
+function knowledgeInfo(entry: KnowledgeEntry): KnowledgeInfo {
   return {
-    key: entry.key,
-    displayName: entry.displayName,
-    path: entry.path,
-    parent: entry.parent ?? null,
-    children: entries
-      .filter((candidate) => candidate.parent === entry.key)
-      .map((candidate) => candidate.key)
-      .sort(),
-    overview: knowledgeOverviewPath(entry),
-    fresh: status.issue === undefined,
+    ...entry,
+    document: `knowledge/${entry.path}`,
+    index: knowledgeIndexPaths(entry.path).at(-1) as string,
   };
 }
 
-async function inspectKnowledgeOverview(
-  root: string,
-  entry: KnowledgeEntry,
-  entries: KnowledgeEntry[],
-): Promise<{ issue?: ValidationIssue; digest?: string }> {
-  const overview = knowledgeOverviewPath(entry);
-  const target = path.join(root, ...overview.split("/"));
-  let source: string;
-  try {
-    source = await readFile(target, "utf8");
-  } catch (error) {
-    return {
-      issue: {
-        code: "AIO-KNOWLEDGE-OVERVIEW",
-        path: overview,
-        message: `Cannot read Knowledge Overview for ${entry.key}: ${errorMessage(error)}`,
-      },
-    };
-  }
-  let document: ReturnType<typeof parseKnowledgeOverviewDocument>;
-  try {
-    document = parseKnowledgeOverviewDocument(source);
-  } catch (error) {
-    return {
-      issue: {
-        code: "AIO-KNOWLEDGE-OVERVIEW",
-        path: overview,
-        message:
-          error instanceof KnowledgeOverviewFormatError
-            ? error.message
-            : `Cannot parse Knowledge Overview: ${errorMessage(error)}`,
-        hint: "Fix the aiongside metadata without changing user-owned content.",
-      },
-    };
-  }
-  if (document.managed && document.managed.key !== entry.key) {
-    return {
-      issue: {
-        code: "AIO-KNOWLEDGE-IDENTITY",
-        path: overview,
-        message: `Knowledge Overview key ${document.managed.key} does not match Registry key ${entry.key}.`,
-        hint: `Restore the matching key before running \`aiongside knowledge sync ${entry.key}\`.`,
-      },
-    };
-  }
-  const digest = await calculateKnowledgeContentDigest(root, entry, entries);
-  if (!document.managed || document.managed.contentDigest !== digest) {
-    return {
-      digest,
-      issue: {
-        code: "AIO-KNOWLEDGE-STALE",
-        path: overview,
-        message: `Knowledge Overview is stale: ${entry.key}.`,
-        hint: `Review the Overview and owned content, then run \`aiongside knowledge sync ${entry.key}\`.`,
-      },
-    };
-  }
-  return { digest };
-}
-
-function knowledgeOverviewPath(entry: KnowledgeEntry): string {
-  return `knowledge/${entry.path}/${OVERVIEW_NAME}`;
-}
-
 async function loadKnowledgeEntries(root: string): Promise<KnowledgeEntry[]> {
-  return (await loadKnowledgeRegistry(root)).entries;
-}
-
-async function loadKnowledgeRegistry(root: string): Promise<{
-  path: string;
-  source: string;
-  entries: KnowledgeEntry[];
-}> {
-  const registryPath = path.join(root, "knowledge", "registry.md");
-  let source: string;
-  let entries: KnowledgeEntry[];
-  try {
-    source = await readFile(registryPath, "utf8");
-    entries = parseKnowledgeRegistry(source).entries;
-  } catch (error) {
-    throw new WorkspaceError(
-      `Cannot read Knowledge Registry: ${errorMessage(error)}`,
-      "AIO-STRUCTURE-KNOWLEDGE-REGISTRY",
-    );
-  }
-  const problem = validateKnowledgeRegistryEntries(entries)[0];
-  if (problem) {
-    throw new WorkspaceError(problem.message, problem.code);
-  }
-  return { path: registryPath, source, entries };
+  const scan = await scanKnowledge(root);
+  const issue = scan.issues.find(
+    (item) => !ROUTING_CODES.some((code) => code === item.code),
+  );
+  if (issue) throw workspaceInvalidError(issue);
+  return scan.entries;
 }
 
 type ExistingPathKind = "missing" | "directory" | "file" | "symlink" | "other";
@@ -2336,56 +1882,6 @@ async function inspectPath(target: string): Promise<ExistingPathKind> {
   } catch (error) {
     if (isNodeError(error) && error.code === "ENOENT") return "missing";
     throw error;
-  }
-}
-
-async function assertKnowledgePathSafe(
-  knowledgeRoot: string,
-  relativePath: string,
-  code: string,
-  allowMissing: boolean,
-): Promise<void> {
-  let current = knowledgeRoot;
-  for (const segment of relativePath.split("/")) {
-    current = path.join(current, segment);
-    const kind = await inspectPath(current);
-    if (kind === "missing" && allowMissing) return;
-    if (kind !== "directory") {
-      throw new WorkspaceError(
-        `Knowledge path is not a regular directory: ${relativePath}`,
-        code,
-      );
-    }
-  }
-}
-
-async function assertMovePathsSafe(
-  root: string,
-  sourcePath: string,
-  destinationPath: string,
-): Promise<void> {
-  const knowledgeRoot = path.join(root, "knowledge");
-  await assertKnowledgePathSafe(
-    knowledgeRoot,
-    sourcePath,
-    "AIO-KNOWLEDGE-MOVE-CONFLICT",
-    false,
-  );
-  await assertKnowledgePathSafe(
-    knowledgeRoot,
-    destinationPath,
-    "AIO-KNOWLEDGE-MOVE-CONFLICT",
-    true,
-  );
-  if (
-    (await inspectPath(
-      path.join(knowledgeRoot, ...destinationPath.split("/")),
-    )) !== "missing"
-  ) {
-    throw new WorkspaceError(
-      `Knowledge destination already exists: knowledge/${destinationPath}`,
-      "AIO-KNOWLEDGE-MOVE-CONFLICT",
-    );
   }
 }
 
@@ -2420,58 +1916,6 @@ async function removeEmptyDirectories(directories: string[]): Promise<void> {
         throw error;
       }
     }
-  }
-}
-
-async function restoreCreatedKnowledgePath(input: {
-  destination: string;
-  overviewPath: string;
-  createdDirectory: boolean;
-  createdOverview: boolean;
-  createdParents: string[];
-}): Promise<void> {
-  if (input.createdDirectory) {
-    await rm(input.destination, { recursive: true, force: true });
-  } else if (input.createdOverview) {
-    await rm(input.overviewPath, { force: true });
-  }
-  await removeEmptyDirectories(input.createdParents);
-}
-
-async function collectStaleKnowledgeKeys(
-  root: string,
-  entries: KnowledgeEntry[],
-): Promise<string[]> {
-  const stale: string[] = [];
-  for (const entry of entries) {
-    const status = await inspectKnowledgeOverview(root, entry, entries);
-    if (status.issue?.code === "AIO-KNOWLEDGE-STALE") stale.push(entry.key);
-  }
-  return stale.sort();
-}
-
-function discardKnowledgePreview(
-  plan: KnowledgeDiscardPlan,
-  trashTarget = `.aiongside/trash/knowledge/${plan.entry.key}-<timestamp>`,
-): DiscardKnowledgePreview {
-  return {
-    key: plan.entry.key,
-    path: plan.entry.path,
-    childKeys: plan.childKeys,
-    referencedBy: plan.referencedBy,
-    trashTarget,
-    staleKeys: plan.staleKeys,
-  };
-}
-
-function resolveKnowledgePlan<T>(action: () => T): T {
-  try {
-    return action();
-  } catch (error) {
-    if (error instanceof KnowledgeMutationError) {
-      throw new WorkspaceError(error.message, error.code);
-    }
-    throw error;
   }
 }
 
@@ -2561,25 +2005,6 @@ function validateWorkState(
 ): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
 
-  const requireCheck = (check: WorkCheck, description: string): void => {
-    if (!metadata.checks[check]) {
-      issues.push({
-        code: "AIO-STATE-GATE",
-        path: workFieldPath(metadata.id, `checks.${check}`),
-        message: `Status ${metadata.status} requires confirmed ${description}.`,
-        hint: `Run \`aiongside work confirm ${metadata.id} ${check}\` after reviewing the Record.`,
-      });
-    }
-  };
-
-  if (metadata.status === "done") {
-    requireCheck("scope", "scope");
-    requireCheck("completion", "completion criteria");
-    requireCheck("verification", "verification");
-    requireCheck("outcome", "outcome");
-    requireCheck("knowledge", "knowledge review");
-  }
-
   if (metadata.status === "done") {
     for (const [index, dependencyId] of metadata.needs.entries()) {
       const dependency = byId.get(dependencyId);
@@ -2600,170 +2025,11 @@ function workFieldPath(id: string, field: string): string {
   return `${WORK_DIR}/${id}/${RECORD_NAME}#${field}`;
 }
 
-interface KnowledgeValidationResult {
-  issues: ValidationIssue[];
-  entries?: KnowledgeEntry[];
-}
-
 async function validateKnowledgeStructure(
   root: string,
-): Promise<KnowledgeValidationResult> {
-  const knowledgePath = path.join(root, "knowledge");
-  let knowledgeStat: Awaited<ReturnType<typeof stat>>;
-  try {
-    knowledgeStat = await stat(knowledgePath);
-  } catch (error) {
-    return {
-      issues: [
-        {
-          code: "AIO-STRUCTURE-KNOWLEDGE",
-          path: relative(root, knowledgePath),
-          message: `Cannot read required knowledge directory: ${errorMessage(error)}`,
-          hint: "Restore the knowledge directory.",
-        },
-      ],
-    };
-  }
-  if (!knowledgeStat.isDirectory()) {
-    return {
-      issues: [
-        {
-          code: "AIO-STRUCTURE-KNOWLEDGE",
-          path: relative(root, knowledgePath),
-          message: "Required knowledge path is not a directory.",
-          hint: "Replace it with a knowledge directory.",
-        },
-      ],
-    };
-  }
-
-  const registryPath = path.join(knowledgePath, "registry.md");
-  try {
-    const registryStat = await stat(registryPath);
-    if (!registryStat.isFile()) {
-      return {
-        issues: [
-          {
-            code: "AIO-STRUCTURE-KNOWLEDGE-REGISTRY",
-            path: relative(root, registryPath),
-            message: "Knowledge Registry is not a regular file.",
-            hint: "Restore knowledge/registry.md as a regular file.",
-          },
-        ],
-      };
-    }
-    const source = await readFile(registryPath, "utf8");
-    const registry = parseKnowledgeRegistry(source);
-    const issues: ValidationIssue[] = validateKnowledgeRegistryEntries(
-      registry.entries,
-    ).map((problem) => ({
-      code: problem.code,
-      path: `${relative(root, registryPath)}#line-${problem.line}.${problem.field}`,
-      message: problem.message,
-      hint: "Fix the managed table in knowledge/registry.md.",
-    }));
-    const canInspectFreshness = issues.length === 0;
-    const validPaths = new Set(
-      registry.entries
-        .filter(
-          (entry) =>
-            !issues.some(
-              (issue) =>
-                issue.path.includes(`#line-${entry.line}.`) &&
-                (issue.code === "AIO-KNOWLEDGE-PATH" ||
-                  issue.code === "AIO-KNOWLEDGE-KEY"),
-            ),
-        )
-        .map((entry) => entry.path),
-    );
-    for (const entry of registry.entries) {
-      if (!validPaths.has(entry.path)) {
-        continue;
-      }
-      const entrypointIssues = await validateKnowledgeEntrypoint(root, entry);
-      issues.push(...entrypointIssues);
-      if (canInspectFreshness && entrypointIssues.length === 0) {
-        const status = await inspectKnowledgeOverview(
-          root,
-          entry,
-          registry.entries,
-        );
-        if (status.issue) issues.push(status.issue);
-      }
-    }
-    return { issues, entries: registry.entries };
-  } catch (error) {
-    return {
-      issues: [
-        {
-          code: "AIO-STRUCTURE-KNOWLEDGE-REGISTRY",
-          path: relative(root, registryPath),
-          message:
-            error instanceof KnowledgeRegistryFormatError
-              ? error.message
-              : `Cannot read Knowledge Registry: ${errorMessage(error)}`,
-          hint: "Restore a readable Registry with Key, Path, Parent, and Display name columns.",
-        },
-      ],
-    };
-  }
-}
-
-async function validateKnowledgeEntrypoint(
-  root: string,
-  entry: KnowledgeEntry,
-): Promise<ValidationIssue[]> {
-  const issues: ValidationIssue[] = [];
-  const knowledgeRoot = path.join(root, "knowledge");
-  let current = knowledgeRoot;
-  for (const segment of entry.path.split("/")) {
-    current = path.join(current, segment);
-    try {
-      const currentStat = await lstat(current);
-      if (currentStat.isSymbolicLink()) {
-        issues.push({
-          code: "AIO-KNOWLEDGE-PATH",
-          path: relative(root, current),
-          message: `Registered Knowledge path uses a symbolic link: ${entry.path}`,
-          hint: "Use regular directories inside knowledge/.",
-        });
-        return issues;
-      }
-      if (!currentStat.isDirectory()) {
-        issues.push({
-          code: "AIO-KNOWLEDGE-ENTRYPOINT",
-          path: relative(root, current),
-          message: `Registered Knowledge path is not a directory: ${entry.path}`,
-          hint: `Create knowledge/${entry.path}/overview.md as a regular file.`,
-        });
-        return issues;
-      }
-    } catch (error) {
-      issues.push({
-        code: "AIO-KNOWLEDGE-ENTRYPOINT",
-        path: relative(root, current),
-        message: `Cannot read registered Knowledge path ${entry.path}: ${errorMessage(error)}`,
-        hint: `Create knowledge/${entry.path}/overview.md as a regular file.`,
-      });
-      return issues;
-    }
-  }
-
-  const overviewPath = path.join(current, OVERVIEW_NAME);
-  try {
-    const overviewStat = await lstat(overviewPath);
-    if (!overviewStat.isFile() || overviewStat.isSymbolicLink()) {
-      throw new Error("Knowledge Overview is not a regular file.");
-    }
-  } catch (error) {
-    issues.push({
-      code: "AIO-KNOWLEDGE-ENTRYPOINT",
-      path: relative(root, overviewPath),
-      message: `Cannot read Knowledge Overview for ${entry.key}: ${errorMessage(error)}`,
-      hint: `Create knowledge/${entry.path}/overview.md as a regular file.`,
-    });
-  }
-  return issues;
+): Promise<{ issues: ValidationIssue[]; entries: KnowledgeEntry[] }> {
+  const { issues, entries } = await scanKnowledge(root);
+  return { issues, entries };
 }
 
 function validateWorkKnowledge(
@@ -2789,7 +2055,7 @@ function validateWorkKnowledge(
           code: "AIO-WORK-KNOWLEDGE-MISSING",
           path: issuePath,
           message: `Knowledge key does not exist: ${key}`,
-          hint: "Register the key or remove the Work relationship.",
+          hint: "Restore the intended document key or remove the invalid Work relationship. Run aiongside knowledge list to see current keys.",
         });
       }
     }
@@ -2875,9 +2141,9 @@ async function validateOverview(
         path: `${relative(root, overviewPath)}#recordBodyDigest`,
         message:
           result.data.recordBodyDigest === undefined
-            ? "Overview has not been reviewed against the current Record body."
-            : "Overview was reviewed against a different Record body.",
-        hint: `Review the Record and Overview, then run \`aiongside work sync ${expected.id}\`.`,
+            ? `Missing recordBodyDigest in ${relative(root, overviewPath)}; no hash is recorded for work/${expected.id}/record.md.`
+            : `Stored recordBodyDigest in ${relative(root, overviewPath)} does not match the current body of work/${expected.id}/record.md.`,
+        hint: `Compare work/${expected.id}/record.md with ${relative(root, overviewPath)}. Update ${relative(root, overviewPath)} if its summary needs changes; otherwise leave its body unchanged. Then run \`aiongside work sync ${expected.id}\`.`,
       });
     }
     return issues;
@@ -2912,7 +2178,7 @@ async function validateViews(
           isNodeError(error) && error.code === "ENOENT"
             ? "Missing generated View."
             : `Cannot read View: ${errorMessage(error)}`,
-        hint: "Run `aiongside view rebuild`.",
+        hint: "Run `aiongside view sync`.",
       });
       continue;
     }
@@ -2921,37 +2187,7 @@ async function validateViews(
         code: "AIO-VIEW-DRIFT",
         path: viewPath,
         message: "Generated View does not match current Records.",
-        hint: "Run `aiongside view rebuild`.",
-      });
-    }
-  }
-  return issues;
-}
-
-async function validateWorkspaceTemplates(
-  root: string,
-): Promise<ValidationIssue[]> {
-  const issues: ValidationIssue[] = [];
-  for (const name of TEMPLATE_NAMES) {
-    const definition = TEMPLATE_DEFINITIONS[name];
-    const templatePath = path.join(root, TEMPLATE_DIR, definition.file);
-    let source: string;
-    try {
-      source = await readFile(templatePath, "utf8");
-    } catch (error) {
-      issues.push({
-        code: "AIO-STRUCTURE-TEMPLATE",
-        path: relative(root, templatePath),
-        message: `Cannot read template: ${errorMessage(error)}`,
-        hint: `Restore ${definition.file} or initialize a new workspace to copy the default.`,
-      });
-      continue;
-    }
-    for (const message of validateTemplate(name, source)) {
-      issues.push({
-        code: "AIO-TEMPLATE-PLACEHOLDER",
-        path: relative(root, templatePath),
-        message,
+        hint: "Run `aiongside view sync`.",
       });
     }
   }
@@ -3005,88 +2241,6 @@ async function writeViews(
     }
     throw error;
   }
-}
-
-function requireCurrentAgentSkill(source: string) {
-  let skill: ReturnType<typeof parseAgentSkill>;
-  try {
-    skill = parseAgentSkill(source);
-  } catch (error) {
-    throw new WorkspaceError(
-      `Invalid bundled Agent Skill: ${errorMessage(error)}`,
-      "AIO-SKILL-FORMAT",
-    );
-  }
-  if (skill.version !== CURRENT_AGENT_SKILL_VERSION) {
-    throw new WorkspaceError(
-      `Bundled Agent Skill version ${skill.version} does not match the CLI contract ${CURRENT_AGENT_SKILL_VERSION}.`,
-      "AIO-SKILL-FORMAT",
-    );
-  }
-  return skill;
-}
-
-async function planAgentSkillTargets(
-  root: string,
-  expectedSource: string,
-): Promise<ManagedFilePlan[]> {
-  const expected = requireCurrentAgentSkill(expectedSource);
-  const result: ManagedFilePlan[] = [];
-  for (const relativePath of AGENT_SKILL_PATHS) {
-    await assertSafeManagedParents(root, relativePath, agentSkillConflict);
-    const target = path.join(root, relativePath);
-    let metadata: Awaited<ReturnType<typeof lstat>>;
-    try {
-      metadata = await lstat(target);
-    } catch (error) {
-      if (isNodeError(error) && error.code === "ENOENT") {
-        result.push({
-          relativePath,
-          target,
-          previous: undefined,
-          next: expectedSource,
-          write: true,
-        });
-        continue;
-      }
-      throw error;
-    }
-    if (!metadata.isFile()) {
-      throw agentSkillConflict(root, target);
-    }
-
-    const previous = await readFile(target, "utf8");
-    if (isExactAgentSkillSource(previous, expectedSource)) {
-      result.push({
-        relativePath,
-        target,
-        previous,
-        next: expectedSource,
-        write: false,
-      });
-      continue;
-    }
-    let installed: ReturnType<typeof parseAgentSkill>;
-    try {
-      installed = parseAgentSkill(previous);
-    } catch {
-      throw agentSkillConflict(root, target);
-    }
-    if (installed.version > expected.version) {
-      throw new WorkspaceError(
-        `${relative(root, target)} uses Agent Skill version ${installed.version}, newer than this CLI supports (${expected.version}). Update the CLI before syncing.`,
-        "AIO-SKILL-VERSION",
-      );
-    }
-    result.push({
-      relativePath,
-      target,
-      previous,
-      next: expectedSource,
-      write: true,
-    });
-  }
-  return result;
 }
 
 async function planAgentInstructionsTarget(
@@ -3198,16 +2352,16 @@ async function assertSafeManagedParents(
   }
 }
 
-function agentSkillConflict(root: string, target: string): WorkspaceError {
+function internalConflict(root: string, target: string): WorkspaceError {
   return new WorkspaceError(
-    `Cannot manage ${relative(root, target)} because it is not an AIongside-managed Agent Skill. Move it to a different name and run the command again.`,
-    "AIO-SKILL-CONFLICT",
+    `Internal workspace path must be a directory, not a symbolic link: ${relative(root, target)}`,
+    "AIO-INTERNAL-CONFLICT",
   );
 }
 
 function instructionsConflict(root: string, target: string): WorkspaceError {
   return new WorkspaceError(
-    `Cannot manage ${relative(root, target)} because it contains user-owned content. Move custom instructions to .aiongside/rules.md and run the command again.`,
+    `Cannot manage ${relative(root, target)} because it contains user-owned content. Preserve custom instructions in your agent's instruction files and resolve this conflict before retrying.`,
     "AIO-INSTRUCTIONS-CONFLICT",
   );
 }
@@ -3272,116 +2426,53 @@ async function applyAgentIntegrationState(
   }
 }
 
-async function validateManagedAgentSkills(
+export async function validateAgentIntegration(
   root: string,
-  config: WorkspaceConfig,
 ): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = [];
-  let expectedSource: string;
-  let expectedInstructions: string;
-  let expected: ReturnType<typeof parseAgentSkill>;
-  try {
-    expectedSource = await loadAgentSkillSource();
-    expectedInstructions = await loadAgentInstructionsSource();
-    expected = requireCurrentAgentSkill(expectedSource);
-  } catch (error) {
-    return [
-      {
-        code:
-          error instanceof WorkspaceError
-            ? error.code
-            : "AIO-INSTRUCTIONS-FORMAT",
-        path:
-          error instanceof WorkspaceError &&
-          error.code === "AIO-INSTRUCTIONS-FORMAT"
-            ? "instructions/aiongside.md"
-            : "skills/aiongside/SKILL.md",
-        message: errorMessage(error),
-        hint: "Reinstall the AIongside CLI package.",
-      },
-    ];
-  }
-
-  if (config.agentSkillVersion !== expected.version) {
+  const expectedInstructions = await loadAgentInstructionsSource();
+  const adapterCandidates = [
+    new URL("./agent-adapter.js", import.meta.url),
+    new URL("../../cli/dist/agent-adapter.js", import.meta.url),
+  ];
+  if (
+    !(
+      await Promise.all(
+        adapterCandidates.map(async (candidate) => {
+          try {
+            return (await stat(candidate)).isFile();
+          } catch {
+            return false;
+          }
+        }),
+      )
+    ).some(Boolean)
+  ) {
     issues.push({
-      code: "AIO-SKILL-OUTDATED",
-      path: `${CONFIG_PATH}#agentSkillVersion`,
-      message: `Configured Agent Skill version ${config.agentSkillVersion} does not match CLI version ${expected.version}.`,
-      hint: "Run `aiongside skill sync`.",
+      code: "AIO-ADAPTER-MISSING",
+      path: "aiongside-agent-adapter",
+      message: "Installed adapter entrypoint is unavailable.",
+      hint: "Reinstall the AIongside CLI package.",
     });
   }
-
-  for (const relativePath of AGENT_SKILL_PATHS) {
-    const target = path.join(root, relativePath);
-    let metadata: Awaited<ReturnType<typeof lstat>>;
-    try {
-      metadata = await lstat(target);
-    } catch (error) {
-      if (isNodeError(error) && error.code === "ENOENT") {
-        issues.push({
-          code: "AIO-SKILL-MISSING",
-          path: relative(root, target),
-          message: "Managed Agent Skill is missing.",
-          hint: "Run `aiongside skill sync`.",
-        });
-        continue;
-      }
-      throw error;
-    }
-    if (!metadata.isFile()) {
+  try {
+    const version = await planIntegrationVersion(root);
+    if (version.write)
       issues.push({
-        code: "AIO-SKILL-MISSING",
-        path: relative(root, target),
-        message: "Managed Agent Skill must be a regular file.",
-        hint: "Move the conflicting entry and run `aiongside skill sync`.",
+        code: "AIO-INTEGRATION-OUTDATED",
+        path: INTEGRATION_PATH,
+        message:
+          "Integration metadata is missing or differs from the installed CLI.",
+        hint: "Run `aiongside workspace upgrade`.",
       });
-      continue;
-    }
-
-    let source: string;
-    try {
-      source = await readFile(target, "utf8");
-    } catch (error) {
-      issues.push({
-        code: "AIO-SKILL-FORMAT",
-        path: relative(root, target),
-        message: `Cannot read managed Agent Skill: ${errorMessage(error)}`,
-        hint: "Fix file access and run `aiongside skill sync`.",
-      });
-      continue;
-    }
-    let installed: ReturnType<typeof parseAgentSkill>;
-    try {
-      installed = parseAgentSkill(source);
-    } catch (error) {
-      issues.push({
-        code: "AIO-SKILL-FORMAT",
-        path: relative(root, target),
-        message: errorMessage(error),
-        hint: "Move the conflicting file and run `aiongside skill sync`.",
-      });
-      continue;
-    }
-    if (
-      installed.version !== expected.version ||
-      installed.version !== config.agentSkillVersion
-    ) {
-      issues.push({
-        code: "AIO-SKILL-OUTDATED",
-        path: relative(root, target),
-        message: `Managed Agent Skill version ${installed.version} does not match the configured CLI contract.`,
-        hint: "Run `aiongside skill sync`.",
-      });
-      continue;
-    }
-    if (!isExactAgentSkillSource(source, expectedSource)) {
-      issues.push({
-        code: "AIO-SKILL-DRIFT",
-        path: relative(root, target),
-        message: "Managed Agent Skill differs from the CLI source.",
-        hint: "Move custom instructions to .aiongside/rules.md and run `aiongside skill sync`.",
-      });
-    }
+  } catch (error) {
+    issues.push({
+      code:
+        error instanceof WorkspaceError ? error.code : "AIO-INTEGRATION-FORMAT",
+      path: INTEGRATION_PATH,
+      message: errorMessage(error),
+      hint: "Resolve the metadata conflict before running `aiongside workspace upgrade`.",
+    });
   }
 
   const instructionsPath = path.join(root, AGENT_INSTRUCTIONS_PATH);
@@ -3402,7 +2493,7 @@ async function validateManagedAgentSkills(
       path: AGENT_INSTRUCTIONS_PATH,
       message:
         "Managed AIongside instructions are missing or not a regular file.",
-      hint: "Run `aiongside skill sync`.",
+      hint: "Run `aiongside workspace upgrade`.",
     });
   } else {
     const instructions = await readFile(instructionsPath, "utf8");
@@ -3411,7 +2502,7 @@ async function validateManagedAgentSkills(
         code: "AIO-INSTRUCTIONS-DRIFT",
         path: AGENT_INSTRUCTIONS_PATH,
         message: "Managed AIongside instructions differ from the CLI source.",
-        hint: "Move custom instructions to .aiongside/rules.md and run `aiongside skill sync`.",
+        hint: "Preserve custom instructions in your agent's instruction files, then run `aiongside workspace upgrade`.",
       });
     }
   }
@@ -3431,7 +2522,7 @@ async function validateManagedAgentSkills(
         code: "AIO-HOOK-MISSING",
         path: relativePath,
         message: "Managed AIongside Hooks are missing or not a regular file.",
-        hint: "Run `aiongside skill sync`.",
+        hint: "Run `aiongside workspace upgrade`.",
       });
       continue;
     }
@@ -3441,7 +2532,7 @@ async function validateManagedAgentSkills(
         code: "AIO-HOOK-DRIFT",
         path: relativePath,
         message: "Managed AIongside Hooks are missing, invalid, or outdated.",
-        hint: "Fix conflicting Hook settings and run `aiongside skill sync`.",
+        hint: "Fix conflicting Hook settings and run `aiongside workspace upgrade`.",
       });
     }
   }
@@ -3484,7 +2575,7 @@ async function assertMutationSafe(
   const allowed = new Set([
     "AIO-STRUCTURE-VIEW",
     "AIO-VIEW-DRIFT",
-    "AIO-KNOWLEDGE-STALE",
+    ...ROUTING_CODES,
     ...allowedCodes,
   ]);
   const blocking = (await validateWorkspace(root)).filter(
@@ -3503,7 +2594,7 @@ function issueTouchesWork(issue: ValidationIssue, id: string): boolean {
 
 function workspaceInvalidError(issue: ValidationIssue): WorkspaceError {
   return new WorkspaceError(
-    `Fix workspace validation first. [${issue.code}] ${issue.path}: ${issue.message}`,
+    `Fix workspace validation first. [${issue.code}] ${issue.path}: ${issue.message}${issue.hint ? `\n${issue.hint}` : ""}`,
     "AIO-WORKSPACE-INVALID",
   );
 }
