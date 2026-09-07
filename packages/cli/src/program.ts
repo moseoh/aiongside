@@ -733,7 +733,7 @@ function writeMoveResult(
       result.missingInputs.map((input) => ({
         status: "warning",
         label: input.option ?? "Required",
-        detail: input.question,
+        detail: [input.question, input.hint].filter(Boolean).join(" "),
       })),
     );
   }

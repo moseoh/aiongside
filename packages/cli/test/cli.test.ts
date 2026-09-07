@@ -1024,6 +1024,93 @@ describe("CLI", () => {
     expect(await readFile(recordPath, "utf8")).toBe(before);
   });
 
+  test("omits completed prerequisites from dry-run and actual done JSON", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    await cli(["--root", root, "work", "new", "Completed prerequisite"]);
+    await cli(["--root", root, "work", "new", "Dependent work"]);
+    await cli(["--root", root, "work", "move", "WORK-1", "done"]);
+    await cli(["--root", root, "work", "needs", "add", "WORK-2", "WORK-1"]);
+    const args = ["--root", root, "work", "move", "WORK-2", "done"];
+    for (const options of [["--dry-run", "--json"], ["--json"], ["--json"]]) {
+      const response = await cli([...args, ...options]);
+      expect(response.stderr).toBe("");
+      expect(JSON.parse(response.stdout)).toMatchObject({
+        canMove: true,
+        requiredInputs: [],
+        missingInputs: [],
+      });
+    }
+    expect(
+      JSON.parse((await cli(["--root", root, "check", "--json"])).stdout).ok,
+    ).toBe(true);
+  });
+
+  test("explains cancelled prerequisites without bypassing completion", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    for (const title of [
+      "Completed prerequisite",
+      "Cancelled prerequisite",
+      "Dependent work",
+    ])
+      await cli(["--root", root, "work", "new", title]);
+    await cli(["--root", root, "work", "move", "WORK-1", "done"]);
+    await cli([
+      "--root",
+      root,
+      "work",
+      "move",
+      "WORK-2",
+      "cancelled",
+      "--cancellation-reason",
+      "Budget removed",
+    ]);
+    for (const id of ["WORK-1", "WORK-2"])
+      await cli(["--root", root, "work", "needs", "add", "WORK-3", id]);
+    const recordPath = path.join(root, "work/WORK-3/record.md");
+    const before = await readFile(recordPath, "utf8");
+    const args = ["--root", root, "work", "move", "WORK-3", "done"];
+    const removeCommand = "aiongside work needs remove WORK-3 WORK-2";
+    const preview = JSON.parse(
+      (await cli([...args, "--dry-run", "--json"])).stdout,
+    );
+    expect(preview.canMove).toBe(false);
+    expect(preview.requiredInputs).toEqual([
+      expect.objectContaining({
+        key: "needs.WORK-2",
+        code: "AIO-DEPENDENCY-BLOCKED",
+        question: expect.stringContaining("is cancelled"),
+        hint: expect.stringContaining(removeCommand),
+      }),
+    ]);
+    expect(preview.missingInputs).toEqual(preview.requiredInputs);
+    const human = await cli([...args, "--dry-run"]);
+    expect(human.stdout).toContain("is cancelled");
+    expect(human.stdout).toContain(removeCommand);
+    expect(human.stdout).not.toContain("Dependency WORK-1");
+    for (const options of [[], ["--json"]]) {
+      const failed = await cli([...args, ...options]).catch((error) => error);
+      expect(failed.code).toBe(2);
+      expect(failed.stderr).toContain("AIO-DEPENDENCY-BLOCKED");
+      expect(failed.stderr).toContain("is cancelled");
+      expect(failed.stderr).toContain(
+        "If this prerequisite is no longer required",
+      );
+      expect(failed.stderr).toContain(removeCommand);
+    }
+    expect(await readFile(recordPath, "utf8")).toBe(before);
+    await cli(["--root", root, "work", "needs", "remove", "WORK-3", "WORK-2"]);
+    expect(JSON.parse((await cli([...args, "--json"])).stdout)).toMatchObject({
+      applied: true,
+      requiredInputs: [],
+      missingInputs: [],
+    });
+    expect(
+      JSON.parse((await cli(["--root", root, "check", "--json"])).stdout).ok,
+    ).toBe(true);
+  });
+
   test("returns one-time Knowledge guidance only for an actual done move", async () => {
     const root = await tempRoot();
     await cli(["init", root]);

@@ -1377,6 +1377,7 @@ async function buildMoveResult(
     );
     for (const dependencyId of loaded.metadata.needs) {
       const dependency = byId.get(dependencyId);
+      if (dependency?.status === "done") continue;
       requiredInputs.push({
         key: `needs.${dependencyId}`,
         source: "record",
@@ -1384,7 +1385,10 @@ async function buildMoveResult(
           ? `Dependency ${dependencyId} is ${dependency.status}. How should it be resolved before completion?`
           : `Dependency ${dependencyId} is missing. How should it be resolved before completion?`,
         code: "AIO-DEPENDENCY-BLOCKED",
-        hint: "Complete the dependency, remove the relationship, or explicitly revise the work record.",
+        hint:
+          dependency?.status === "cancelled"
+            ? `Cancellation does not satisfy this prerequisite. If this prerequisite is no longer required, run aiongside work needs remove ${loaded.metadata.id} ${dependencyId}. Otherwise, explicitly reopen and complete the prerequisite before completing this work.`
+            : "Complete the dependency, remove the relationship, or explicitly revise the work record.",
       });
     }
   }
