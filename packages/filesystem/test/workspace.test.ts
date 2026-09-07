@@ -1099,6 +1099,81 @@ describe("workspace lifecycle", () => {
     expect(await validateWorkspace(root)).toEqual([]);
   });
 
+  test.each(WORK_STATUSES)(
+    "reports only unsatisfied completion dependencies when a prerequisite is %s",
+    async (status) => {
+      const root = await workspace();
+      const completed = await createWork(root, "Completed prerequisite");
+      const candidate = await createWork(root, "Other prerequisite");
+      const dependent = await createWork(root, "Dependent work");
+      await moveWork(root, completed.id, "done");
+      if (status !== "inbox") {
+        await moveWork(root, candidate.id, status, {
+          waitingReason: "Awaiting confirmation",
+          resumeWhen: "Confirmation arrives",
+          cancellationReason: "Prerequisite was cancelled",
+        });
+      }
+      await addWorkDependency(root, dependent.id, completed.id);
+      await addWorkDependency(root, dependent.id, candidate.id);
+      const recordPath = path.join(root, "work", dependent.id, "record.md");
+      const before = await readFile(recordPath, "utf8");
+      const preview = await previewMoveWork(root, dependent.id, "done");
+      expect(await readFile(recordPath, "utf8")).toBe(before);
+      expect(preview.requiredInputs.map((input) => input.key)).toEqual(
+        status === "done" ? [] : [`needs.${candidate.id}`],
+      );
+      expect(preview.missingInputs).toEqual(preview.requiredInputs);
+      expect(preview.canMove).toBe(status === "done");
+
+      if (status !== "done") {
+        if (status === "cancelled") {
+          expect(preview.requiredInputs[0]?.question).toContain("cancelled");
+          expect(preview.requiredInputs[0]?.hint).toContain(
+            "If this prerequisite is no longer required",
+          );
+          expect(preview.requiredInputs[0]?.hint).toContain(
+            `aiongside work needs remove ${dependent.id} ${candidate.id}`,
+          );
+        }
+        await expect(
+          moveWork(root, dependent.id, "done"),
+        ).rejects.toMatchObject({
+          code: "AIO-DEPENDENCY-BLOCKED",
+        });
+        expect(await readFile(recordPath, "utf8")).toBe(before);
+        await removeWorkDependency(root, dependent.id, candidate.id);
+      }
+
+      const done = await moveWork(root, dependent.id, "done");
+      expect(done.applied).toBe(true);
+      expect(done.requiredInputs).toEqual([]);
+      expect(done.missingInputs).toEqual([]);
+      const repeated = await moveWork(root, dependent.id, "done");
+      expect(repeated.applied).toBe(false);
+      expect(repeated.requiredInputs).toEqual([]);
+      expect(await validateWorkspace(root)).toEqual([]);
+    },
+  );
+
+  test("keeps missing prerequisites in completion questions", async () => {
+    const root = await workspace();
+    const dependent = await createWork(root, "Missing prerequisite");
+    await setNeeds(root, dependent.id, ["AIO-999"]);
+    const preview = await previewMoveWork(root, dependent.id, "done");
+    expect(preview.canMove).toBe(false);
+    expect(preview.requiredInputs).toEqual([
+      expect.objectContaining({
+        key: "needs.AIO-999",
+        code: "AIO-DEPENDENCY-BLOCKED",
+        question: expect.stringContaining("is missing"),
+      }),
+    ]);
+    await expect(moveWork(root, dependent.id, "done")).rejects.toMatchObject({
+      code: "AIO-WORKSPACE-INVALID",
+    });
+  });
+
   test("completes arbitrary Korean content without confirmations or template matching", async () => {
     const root = await workspace();
     await writeFile(
