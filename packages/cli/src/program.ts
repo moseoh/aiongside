@@ -593,7 +593,7 @@ export function createProgram(): Command {
     });
 
   for (const name of ["context", "check", "doctor"] as const) {
-    program
+    const command = program
       .command(name)
       .description(
         name === "context"
@@ -627,6 +627,11 @@ export function createProgram(): Command {
         }
         process.exitCode = result.ok ? 0 : 1;
       });
+    if (name === "check")
+      command.addHelpText(
+        "after",
+        "\nWork, Knowledge, indexes, Views and completion seals share workspace and nested .gitignore selection. Ignored directories are not traversed; ignored files are not read as content. .gitignore files configure selection but are not sealed or indexed. Changing the selected completion content invalidates an existing seal; rules-only changes with identical selected content do not. References from managed Work must still resolve to managed IDs and keys. Links to ignored targets still require a safe existing path. Physical collision checks and discard previews include ignored files. Git installation, tracked-file status and global ignore settings are not used.",
+      );
   }
 
   return program;

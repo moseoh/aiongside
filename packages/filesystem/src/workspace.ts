@@ -54,6 +54,7 @@ import {
   mergeAgentHookSettings,
 } from "./agent-integration.js";
 import { WorkspaceError } from "./errors.js";
+import { ManagedFiles } from "./gitignore.js";
 import {
   INDEX_SOURCE,
   ROUTING_CODES,
@@ -266,7 +267,8 @@ export async function initializeWorkspace(
       definition.contents,
     );
   }
-  await atomicWrite(path.join(root, "knowledge", "index.md"), INDEX_SOURCE);
+  if (await new ManagedFiles(root).includes("knowledge/index.md"))
+    await atomicWrite(path.join(root, "knowledge", "index.md"), INDEX_SOURCE);
   await writeViews(root, []);
   await applyAgentIntegrationState(
     root,
@@ -434,9 +436,12 @@ export async function syncAgentIntegration(
   });
 }
 
-export async function listWorks(root: string): Promise<LoadedWork[]> {
+export async function listWorks(
+  root: string,
+  files = new ManagedFiles(root),
+): Promise<LoadedWork[]> {
   const workRoot = path.join(root, WORK_DIR);
-  const entries = await readdir(workRoot, { withFileTypes: true });
+  const entries = await files.entries(workRoot);
   const works: LoadedWork[] = [];
   for (const entry of entries.sort((left, right) =>
     left.name.localeCompare(right.name),
@@ -445,6 +450,7 @@ export async function listWorks(root: string): Promise<LoadedWork[]> {
       continue;
     }
     const recordPath = path.join(workRoot, entry.name, RECORD_NAME);
+    if (!(await files.includes(recordPath))) continue;
     try {
       const source = await readFile(recordPath, "utf8");
       const document = parseMarkdownDocument(source);
@@ -492,9 +498,20 @@ export async function createWork(
 
     const staging = path.join(root, STAGING_DIR, `${id}-${randomUUID()}`);
     const destination = path.join(root, WORK_DIR, id);
+    const files = new ManagedFiles(root);
+    await files.assertIncluded(path.join(destination, RECORD_NAME));
+    const includeOverview = await files.includes(
+      path.join(destination, OVERVIEW_NAME),
+    );
+    const supportingDirectories = [];
+    for (const { name } of SUPPORTING_CONTENT_DIRECTORIES)
+      if (await files.includes(path.join(destination, name), true))
+        supportingDirectories.push(name);
     const [recordTemplate, overviewTemplate] = await Promise.all([
       readWorkspaceTemplate(root, "record"),
-      readWorkspaceTemplate(root, "overview"),
+      includeOverview
+        ? readWorkspaceTemplate(root, "overview")
+        : Promise.resolve(""),
     ]);
     const recordSource = createRecordDocument(metadata, recordTemplate);
     const recordBodyDigest = calculateMarkdownBodyDigest(recordSource);
@@ -508,11 +525,19 @@ export async function createWork(
     try {
       await Promise.all([
         atomicWrite(path.join(staging, RECORD_NAME), recordSource),
-        atomicWrite(
-          path.join(staging, OVERVIEW_NAME),
-          createOverviewDocument(metadata, recordBodyDigest, overviewTemplate),
-        ),
-        ...SUPPORTING_CONTENT_DIRECTORIES.map(({ name }) =>
+        ...(includeOverview
+          ? [
+              atomicWrite(
+                path.join(staging, OVERVIEW_NAME),
+                createOverviewDocument(
+                  metadata,
+                  recordBodyDigest,
+                  overviewTemplate,
+                ),
+              ),
+            ]
+          : []),
+        ...supportingDirectories.map((name) =>
           mkdir(path.join(staging, name), { recursive: true }),
         ),
       ]);
@@ -646,13 +671,20 @@ export async function moveWork(
       context.loaded.metadata.id,
       "plan.md",
     );
-    const previousPlan = await readOptionalFile(planPath);
+    const includePlan = await new ManagedFiles(root).includes(planPath);
+    const previousPlan = includePlan
+      ? await readOptionalFile(planPath)
+      : undefined;
     try {
       await atomicWrite(
         recordPath,
         formatMarkdownDocument(record, document.body),
       );
-      if (record.status === "active" && previousPlan === undefined) {
+      if (
+        includePlan &&
+        record.status === "active" &&
+        previousPlan === undefined
+      ) {
         const planTemplate = await readWorkspaceTemplate(root, "plan");
         await atomicWrite(
           planPath,
@@ -667,9 +699,9 @@ export async function moveWork(
       );
     } catch (error) {
       await atomicWrite(recordPath, context.loaded.source);
-      if (previousPlan === undefined) {
+      if (includePlan && previousPlan === undefined) {
         await rm(planPath, { force: true });
-      } else {
+      } else if (includePlan && previousPlan !== undefined) {
         await atomicWrite(planPath, previousPlan);
       }
       await writeViews(
@@ -746,6 +778,9 @@ export async function syncWorkOverview(
     }
     const recordPath = path.join(directory, RECORD_NAME);
     await assertSyncFile(root, recordPath, "AIO-STRUCTURE-RECORD");
+    const files = new ManagedFiles(root);
+    await files.assertIncluded(recordPath);
+    await files.assertIncluded(path.join(directory, OVERVIEW_NAME));
     const source = await readFile(recordPath, "utf8");
     let record: WorkMetadata;
     try {
@@ -1159,13 +1194,14 @@ export async function validateWorkspace(
     return issues;
   }
 
-  const knowledge = await validateKnowledgeStructure(root);
+  const files = new ManagedFiles(root);
+  const knowledge = await validateKnowledgeStructure(root, files);
   issues.push(...knowledge.issues);
 
   const workRoot = path.join(root, WORK_DIR);
   let entries: Dirent[];
   try {
-    entries = await readdir(workRoot, { withFileTypes: true });
+    entries = await files.entries(workRoot);
   } catch (error) {
     issues.push({
       code: "AIO-STRUCTURE-WORK-DIR",
@@ -1190,13 +1226,15 @@ export async function validateWorkspace(
       continue;
     }
     const directoryPath = path.join(workRoot, entry.name);
-    issues.push(
-      ...(await validateWorkSupportingStructure(root, directoryPath)),
-    );
     const recordPath = path.join(directoryPath, RECORD_NAME);
+    if (!(await files.includes(recordPath))) continue;
+    issues.push(
+      ...(await validateWorkSupportingStructure(root, directoryPath, files)),
+    );
     const overviewPath = path.join(directoryPath, OVERVIEW_NAME);
-    const hasOverview = await pathExists(overviewPath);
-    if (!hasOverview) {
+    const includeOverview = await files.includes(overviewPath);
+    const hasOverview = includeOverview && (await pathExists(overviewPath));
+    if (includeOverview && !hasOverview) {
       issues.push({
         code: "AIO-STRUCTURE-OVERVIEW",
         path: relative(root, overviewPath),
@@ -1306,6 +1344,7 @@ export async function validateWorkspace(
         loaded.metadata.id,
         loaded.metadata,
         document.body,
+        files,
       );
       if (digest !== loaded.metadata.completionSeal.digest) {
         issues.push({
@@ -1318,9 +1357,14 @@ export async function validateWorkspace(
     }
   }
   issues.push(
-    ...(await validateDocumentLinks(root, await workMarkdownDocuments(root))),
+    ...(await validateDocumentLinks(
+      root,
+      await workMarkdownDocuments(root, files),
+    )),
   );
-  issues.push(...(await validateViews(root, viewMetadata, canCompareViews)));
+  issues.push(
+    ...(await validateViews(root, viewMetadata, canCompareViews, files)),
+  );
   return issues;
 }
 
@@ -1476,6 +1520,7 @@ async function calculateCompletionDigest(
   id: string,
   metadata: WorkMetadata,
   recordBody: string,
+  selection = new ManagedFiles(root),
 ): Promise<string> {
   const hash = createHash("sha256");
   const stableMetadata = {
@@ -1492,7 +1537,7 @@ async function calculateCompletionDigest(
 
   const workPath = path.join(root, WORK_DIR, id);
   const recordPath = `${WORK_DIR}/${id}/${RECORD_NAME}`;
-  const files = await listRelativeFiles(root, workPath);
+  const files = await selection.files(workPath);
   for (const file of files.sort()) {
     if (file === recordPath || file === `${WORK_DIR}/${id}/${OVERVIEW_NAME}`) {
       continue;
@@ -1751,7 +1796,9 @@ async function createMissingIndexes(
   filePath: string,
   created: string[],
 ): Promise<void> {
+  const files = new ManagedFiles(root);
   for (const index of knowledgeIndexPaths(filePath)) {
+    if (!(await files.includes(index))) continue;
     const target = path.join(root, index);
     const kind = await safePathKind(root, target);
     if (kind === "missing") {
@@ -1778,6 +1825,7 @@ async function assertKnowledgeFilePath(
       `Knowledge path ${creating ? "already exists or is unsafe" : "is not a regular file"}: knowledge/${filePath}`,
       creating ? "AIO-KNOWLEDGE-CREATE-CONFLICT" : "AIO-KNOWLEDGE-PATH",
     );
+  await new ManagedFiles(root).assertIncluded(target);
 }
 
 async function writeWorkMetadataMutation(
@@ -1827,7 +1875,8 @@ export async function showKnowledge(
 export async function getKnowledgeTree(
   root: string,
 ): Promise<KnowledgeTreeNode[]> {
-  const scan = await scanKnowledge(root);
+  const files = new ManagedFiles(root);
+  const scan = await scanKnowledge(root, files);
   const blocking = scan.issues.find(
     (issue) => !ROUTING_CODES.some((code) => code === issue.code),
   );
@@ -1835,8 +1884,8 @@ export async function getKnowledgeTree(
   const byPath = new Map(scan.entries.map((entry) => [entry.path, entry]));
   const visit = async (directory: string): Promise<KnowledgeTreeNode[]> => {
     const nodes: KnowledgeTreeNode[] = [];
-    for (const item of (await readdir(directory, { withFileTypes: true })).sort(
-      (a, b) => a.name.localeCompare(b.name),
+    for (const item of (await files.entries(directory)).sort((a, b) =>
+      a.name.localeCompare(b.name),
     )) {
       const absolute = path.join(directory, item.name);
       const filePath = relative(path.join(root, "knowledge"), absolute);
@@ -2031,8 +2080,9 @@ function workFieldPath(id: string, field: string): string {
 
 async function validateKnowledgeStructure(
   root: string,
+  files: ManagedFiles,
 ): Promise<{ issues: ValidationIssue[]; entries: KnowledgeEntry[] }> {
-  const { issues, entries } = await scanKnowledge(root);
+  const { issues, entries } = await scanKnowledge(root, files);
   return { issues, entries };
 }
 
@@ -2070,10 +2120,12 @@ function validateWorkKnowledge(
 async function validateWorkSupportingStructure(
   root: string,
   workPath: string,
+  files: ManagedFiles,
 ): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = [];
   for (const definition of SUPPORTING_CONTENT_DIRECTORIES) {
     const target = path.join(workPath, definition.name);
+    if (!(await files.includes(target, true))) continue;
     try {
       const targetStat = await stat(target);
       if (targetStat.isDirectory()) {
@@ -2166,10 +2218,12 @@ async function validateViews(
   root: string,
   metadata: WorkMetadata[],
   canCompare: boolean,
+  files: ManagedFiles,
 ): Promise<ValidationIssue[]> {
   const issues: ValidationIssue[] = [];
   const expected = renderViews(metadata);
   for (const viewPath of VIEW_PATHS) {
+    if (!(await files.includes(viewPath))) continue;
     const target = path.join(root, viewPath);
     let actual: string;
     try {
@@ -2222,12 +2276,16 @@ async function writeViews(
   metadata: WorkMetadata[],
 ): Promise<void> {
   const views = renderViews(metadata);
+  const files = new ManagedFiles(root);
+  const paths = [];
+  for (const name of VIEW_PATHS)
+    if (await files.includes(name)) paths.push(name);
   const previous = new Map<string, string | undefined>();
-  for (const name of VIEW_PATHS) {
+  for (const name of paths) {
     previous.set(name, await readOptionalFile(path.join(root, name)));
   }
   try {
-    for (const name of VIEW_PATHS) {
+    for (const name of paths) {
       const contents = views[name];
       if (contents === undefined) {
         throw new Error(`View renderer omitted ${name}`);

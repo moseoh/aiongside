@@ -71,6 +71,14 @@ Each folder, including `knowledge/`, has an `index.md` with descriptions and Mar
 
 ## Mechanical checks
 
+Work and Knowledge discovery, checks, index coverage, Views and completion seals share `.gitignore` selection at the workspace root and in traversed subdirectories. Add `node_modules/` to exclude dependency files from both link checks and completion hashes. Ignored directories are not traversed; lower-level rules and negations apply only within reachable directories. Rules are case-sensitive, read once per directory per selection, and refreshed on the next operation. Git installation, tracked-file status, global excludes and rules outside the workspace are not used. No dependency folder is excluded by default.
+
+Ignored Records are absent from managed Work discovery; ignored Knowledge documents are absent from key lookup and index coverage. References from included Work to those IDs or keys are still unresolved-reference errors. Ignored Overview, Plan, supporting folders, indexes and Views are not read, required or automatically written. Explicit writes such as Work sync or Knowledge creation/movement into excluded paths are rejected. A link from an included document into an ignored path still requires a safe existing target; its body is not followed.
+
+`.gitignore` is configuration, not content: its own bytes are excluded from completion hashes and Knowledge index coverage. Adding a pattern for a nonexistent folder leaves the hash unchanged. Excluding or re-including actual sealed content changes the hash and invalidates the old seal. Check never rewrites seals; use the existing explicit reopen and complete flow after reviewing the scope change. Changes inside excluded files do not invalidate a seal created with that selection.
+
+Physical collision protection, Work ID allocation and discard previews still account for actual files, including ignored ones. Discard moves the entire Work directory to recoverable trash. Runtime configuration, templates, hooks, locks and internal recovery files remain operational inputs, not managed document discovery. Unreadable or non-regular ignore files fail the scan instead of silently disabling rules.
+
 `check --json` reads Work hashes, structure, metadata, identifiers, references, dependencies, completion seals, and generated Views. It recursively checks Knowledge keys, index coverage, and Work/Knowledge local Markdown links. It does not judge whether work is meaningful, approved, complete in prose, or awaiting an answer. It does not inspect templates or agent integration.
 
 When a stored Work hash differs or is missing, each issue explains the reason and identifies the Record and Overview paths. Compare those documents, update the Overview if needed, then run `work sync <ID>`. If the Overview body is still accurate, leave it unchanged and sync after comparison. Sync records a hash; it does not approve content.
