@@ -271,6 +271,16 @@ try {
   await page.goto(`${url}/knowledge`);
   await heading("Knowledge index");
   const ktree = page.getByTestId("knowledge-tree");
+  await page
+    .getByTestId("document")
+    .getByRole("link", { name: "Events" })
+    .click();
+  await page.waitForURL(/\/knowledge\/events$/);
+  await heading("Events");
+  await page.goto(`${url}/knowledge/events/index.md`);
+  await heading("Events");
+  await page.goto(`${url}/knowledge`);
+  await heading("Knowledge index");
   await ktree.getByRole("link", { name: "events" }).click();
   await page.waitForURL(/\/knowledge\/events$/);
   await heading("Events");

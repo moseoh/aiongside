@@ -52,7 +52,9 @@ export function routeForPath(target: string): string | null {
     return `/work/${parts[1]}/file/${rest.map(encodeURIComponent).join("/")}`;
   }
   if (parts[0] === "knowledge") {
-    const rest = parts.slice(1);
+    // A folder's index.md is shown by the folder route, not as a document.
+    const rest =
+      parts.at(-1) === "index.md" ? parts.slice(1, -1) : parts.slice(1);
     return rest.length
       ? `/knowledge/${rest.map(encodeURIComponent).join("/")}`
       : "/knowledge";

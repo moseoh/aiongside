@@ -32,7 +32,7 @@ export function KnowledgePage() {
   const works = useWorks();
   const knowledge = useKnowledge();
   const [filter, setFilter] = useState("");
-  const relative = decodeSplat(splat);
+  const relative = decodeSplat(splat).replace(/(?:^|\/)index\.md$/, "");
   const selected = relative ? `knowledge/${relative}` : "knowledge";
   const node = knowledge.data
     ? relative
