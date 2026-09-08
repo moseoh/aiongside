@@ -4,3 +4,4 @@ coverage/
 *.tsbuildinfo
 .DS_Store
 .artifacts/
+packages/web/src/assets.generated.ts

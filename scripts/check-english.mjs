@@ -14,7 +14,11 @@ const files = stdout
   .filter((file) => file.length > 0);
 const violations = [];
 
+// Locale resources (*.ko.*) and the embedded web bundle carry translated UI text.
+const exempt = /(?:\.ko\.[a-z]+|assets\.generated\.ts)$/;
+
 for (const file of files) {
+  if (exempt.test(file)) continue;
   let source;
   try {
     source = await readFile(file, "utf8");

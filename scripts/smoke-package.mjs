@@ -487,6 +487,44 @@ export async function smokePackage(tarball) {
     if (checked.stdout !== "✓ Check passed\n") {
       throw new Error("Installed CLI check output is invalid.");
     }
+    const webArgs = ["--root", workspace, "view", "web"];
+    try {
+      const started = await execFileAsync(
+        cli,
+        [...webArgs, "--host", "localhost", "--background"],
+        {
+          ...options,
+          timeout: 15_000,
+        },
+      );
+      const url = /http:\/\/localhost:\d+/.exec(started.stdout)?.[0];
+      if (!url)
+        throw new Error("Installed Web View did not report a ready URL.");
+      for (const asset of ["/", "/app.js", "/style.css"]) {
+        const response = await fetch(url + asset);
+        if (!response.ok || !(await response.text()).length)
+          throw new Error(`Missing bundled Web asset: ${asset}`);
+      }
+      const works = await (await fetch(`${url}/api/works`)).json();
+      if (!works.works.some((work) => work.id === "WORK-1"))
+        throw new Error("Installed Web View did not list Work.");
+      const overview = await fetch(
+        `${url}/api/document?path=work/WORK-1/overview.md`,
+      );
+      if (!overview.ok)
+        throw new Error("Installed Web View could not open Overview.");
+      const stopped = await execFileAsync(cli, [...webArgs, "stop"], {
+        ...options,
+        timeout: 10_000,
+      });
+      if (!stopped.stdout.includes("stopped"))
+        throw new Error("Installed Web View did not stop.");
+    } finally {
+      await execFileAsync(cli, [...webArgs, "stop"], {
+        ...options,
+        timeout: 10_000,
+      }).catch(() => {});
+    }
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }

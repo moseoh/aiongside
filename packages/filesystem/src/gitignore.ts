@@ -1,3 +1,4 @@
+import type { Dirent } from "node:fs";
 import { lstat, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import ignore, { type Ignore } from "ignore";
@@ -131,6 +132,49 @@ export class ManagedFiles {
           scopes,
         ),
     );
+  }
+
+  /**
+   * Directory listing that keeps excluded entries and marks them instead of
+   * pruning. Rules are still read at every level, including inside excluded
+   * parents, so a browser can reveal ignored content on request.
+   */
+  async selection(directory: string): Promise<{
+    ignored: boolean;
+    entries: { entry: Dirent; ignored: boolean }[];
+  }> {
+    const absolute = path.resolve(this.root, directory);
+    const relative = path.relative(this.root, absolute);
+    if (
+      relative === ".." ||
+      relative.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relative)
+    )
+      throw new WorkspaceError(
+        `Managed path is outside the workspace: ${directory}`,
+        "AIO-PATH-IGNORED",
+      );
+    let scopes = await extendIgnoreScopes(this.root, []);
+    let ignored = false;
+    let current = this.root;
+    for (const segment of relative ? relative.split(path.sep) : []) {
+      current = path.join(current, segment);
+      if (!ignored && isIgnored(current, true, scopes)) ignored = true;
+      scopes = await extendIgnoreScopes(current, scopes);
+    }
+    const entries = (await readdir(absolute, { withFileTypes: true })).map(
+      (entry) => ({
+        entry,
+        ignored:
+          ignored ||
+          isIgnored(
+            path.join(absolute, entry.name),
+            entry.isDirectory(),
+            scopes,
+          ),
+      }),
+    );
+    return { ignored, entries };
   }
 
   async files(directory: string): Promise<string[]> {

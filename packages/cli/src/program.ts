@@ -52,6 +52,12 @@ import {
   skipUpdateVersion,
   userUpdatePaths,
 } from "./update-notices.js";
+import {
+  runForegroundWeb,
+  runWebWorker,
+  startBackgroundWeb,
+  stopBackgroundWeb,
+} from "./web-runtime.js";
 
 const cliVersion = (
   createRequire(import.meta.url)("../package.json") as { version: string }
@@ -581,7 +587,76 @@ export function createProgram(): Command {
       ]);
     });
 
-  const view = program.command("view").description("Manage generated Views");
+  const view = program
+    .command("view")
+    .description("Read Work in a browser or sync Markdown Views");
+
+  const web = view
+    .command("web")
+    .description("Open a local read-only Work browser")
+    .option(
+      "--host <host>",
+      "Bind to this IP or hostname (default: 127.0.0.1); trusted networks only, no login",
+    )
+    .option("--port <port>", "Listen on this port (default: an available port)")
+    .option("--background", "Run in the background; stop with view web stop")
+    .action(
+      async (options: {
+        host?: string;
+        port?: string;
+        background?: boolean;
+      }) => {
+        if (process.env.AIONGSIDE_WEB_CHILD === "1" && process.send) {
+          await runWebWorker();
+          return;
+        }
+        const root = await commandRoot(program);
+        const port =
+          options.port === undefined ? undefined : Number(options.port);
+        if (
+          port !== undefined &&
+          (!/^\d+$/.test(options.port ?? "") ||
+            !Number.isInteger(port) ||
+            port < 1 ||
+            port > 65535)
+        )
+          throw new WorkspaceError(
+            "Port must be an integer from 1 to 65535.",
+            "AIO-WEB-PORT",
+          );
+        const server = options.background
+          ? await startBackgroundWeb(root, port, options.host)
+          : await runForegroundWeb(root, port, options.host);
+        process.stdout.write(
+          `${server.url}\nWorkspace: ${server.root}\n${options.background ? `Stop: aiongside --root ${JSON.stringify(server.root)} view web stop` : "Stop: Ctrl+C"}\n`,
+        );
+        if (server.network)
+          ui.warning(
+            "No login is required to read Work documents. Use only a trusted network; control access with your network policy.",
+          );
+      },
+    );
+
+  web
+    .command("stop")
+    .description("Stop this workspace's background Web View")
+    .action(async () => {
+      if (
+        web.opts().background ||
+        web.opts().port !== undefined ||
+        web.opts().host !== undefined
+      )
+        throw new WorkspaceError(
+          "Stop does not accept startup options.",
+          "AIO-WEB-OPTION",
+        );
+      const root = await commandRoot(program);
+      ui.success(
+        (await stopBackgroundWeb(root))
+          ? "Background Web View stopped"
+          : "No background Web View is running",
+      );
+    });
 
   view
     .command("sync")

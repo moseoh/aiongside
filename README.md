@@ -23,13 +23,33 @@ An actual move to done tells AI to read the Work Record and deliverables, follow
 - Workspace: `init`, `update`, `context`, `check`, `doctor`, `workspace upgrade`.
 - Work: `work new`, `move`, `sync`, `discard`, `needs add/remove`, `knowledge add/remove`.
 - Knowledge: `knowledge new`, `move`, `discard`, `list`, `tree`, `show`.
-- Views: `view sync`.
+- Views: `view sync`, `view web`, `view web stop`.
 
 Use command-specific `--help` for options. Work statuses are inbox, active, waiting, done, and cancelled. Waiting, reopening, and cancellation require their documented reason options. Done requires valid mechanical state and completed dependencies, not body checkboxes or confirmations.
 
 Work Knowledge links record that a completed Work's results were incorporated into Knowledge. They survive reopening and are excluded from the completion seal. Do not record documents that were only consulted or are awaiting an update. The CLI records the assertion without checking content meaning or command order. Knowledge can also be created and updated independently of Work.
 
 Discard commands preview affected files and references with `--dry-run`, then require the exact identifier through `--confirm`. Discard moves content into recoverable workspace trash.
+
+## Read-only Web View
+
+```sh
+aiongside view web
+aiongside view web --port 3000
+aiongside view web --host workstation --port 3000
+aiongside view web --background
+aiongside view web stop
+```
+
+The default command prints a local URL and stays in the foreground; stop with Ctrl+C. `--port` selects a port, otherwise an available port is assigned. `--background` returns after the server is ready; `view web stop` stops that workspace's background server. Use the global `--root <workspace>` option from another directory. Repeated background starts return the existing URL. Stopping an absent server is a no-op.
+
+Browse all Work items, search by ID or title, filter by status, and sort by ID or update date. Select a Work to read its Overview, then expand folders to open Record, Plan, and supporting files. Refresh to pick up external edits. Markdown and UTF-8 text up to 1 MiB are previewed; other files are offered as downloads. HTML and SVG are never executed. Remote images are not loaded automatically. Knowledge and legacy browsing are not included in this first stage.
+
+The default bind address is `127.0.0.1`. Use `--host <IP-or-hostname>` for a specific network interface; hostnames are resolved once, preferring IPv4. The displayed URL preserves the hostname. Wildcard addresses (`0.0.0.0` and `::`) are rejected. There is no login: anyone allowed to reach the server can read managed Work documents. Use only a trusted network and its access controls. No network or Tailscale settings are changed. An explicit host or port different from an existing background server requires stopping it first.
+
+The Web View uses the shared nested `.gitignore` selection and rejects symlinks and paths outside managed Work. It does not run check, sync, or repair, and does not modify workspace files. Stale summaries and completion errors do not block reading. Background server records are private files under `$XDG_CACHE_HOME/aiongside/web` (default `~/.cache/aiongside/web`), separate from workspace data. Stop authenticates the server at its saved local IP instead of resolving the hostname again or terminating an arbitrary saved PID. No agent integration upgrade is required.
+
+For source development, run `bun run build` and `bun run test:web-browser` (install Chromium once with `bunx playwright install chromium`). Browser tooling is development-only; the installed CLI includes its UI and needs no Bun, browser automation package, CDN, or source checkout.
 
 ## Documents and templates
 
@@ -121,3 +141,7 @@ bun run package:check
 ```
 
 CI runs Node.js 22 and 24 package checks. Local verification limitations are recorded separately; publishing is not part of implementation validation.
+
+## Web View UI
+
+The browser UI lives in `packages/web/ui` (React + Vite). `bun run build` builds it and embeds the output into the CLI bundle. For hot reload run a server on a fixed port and `bun run dev:ui`; see `packages/web/ui/README.md`.
