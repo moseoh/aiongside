@@ -219,6 +219,118 @@ export async function smokePackage(tarball) {
       );
     }
 
+    await execFileAsync(
+      cli,
+      ["--root", workspace, "work", "new", "Ignore fixture"],
+      options,
+    );
+    const dependencyDirectory = path.join(
+      workspace,
+      "work/WORK-1/poc/node_modules/fixture",
+    );
+    await mkdir(dependencyDirectory, { recursive: true });
+    await writeFile(
+      path.join(dependencyDirectory, "README.md"),
+      "[Source](src/missing.ts)\n",
+    );
+    let unfiltered;
+    try {
+      await execFileAsync(
+        cli,
+        ["--root", workspace, "check", "--json"],
+        options,
+      );
+    } catch (error) {
+      if (error.code !== 1) throw error;
+      unfiltered = JSON.parse(error.stdout);
+    }
+    if (unfiltered?.issues?.[0]?.code !== "AIO-LINK-MISSING") {
+      throw new Error(
+        "Installed check must report the unfiltered dependency link.",
+      );
+    }
+    await writeFile(path.join(workspace, "work/.gitignore"), "node_modules/\n");
+    const filtered = JSON.parse(
+      (
+        await execFileAsync(
+          cli,
+          ["--root", workspace, "check", "--json"],
+          options,
+        )
+      ).stdout,
+    );
+    if (!filtered.ok || filtered.issues.length !== 0) {
+      throw new Error("Installed check must respect nested ignore rules.");
+    }
+    await execFileAsync(
+      cli,
+      ["--root", workspace, "work", "move", "WORK-1", "done"],
+      options,
+    );
+    await writeFile(
+      path.join(dependencyDirectory, "payload.bin"),
+      "Ignored after completion",
+    );
+    await mkdir(path.join(workspace, "knowledge/scratch"));
+    await writeFile(path.join(workspace, "knowledge/.gitignore"), "scratch/\n");
+    await writeFile(
+      path.join(workspace, "knowledge/scratch/broken.md"),
+      "No key; ignored\n[Missing](missing.md)\n",
+    );
+    const filteredStop = await execFileWithInput(
+      adapter,
+      ["stop"],
+      options,
+      JSON.stringify({ cwd: workspace, hook_event_name: "Stop" }),
+    );
+    if (filteredStop.stdout !== "{}\n") {
+      throw new Error(
+        "Installed Stop must ignore dependency content in seals and Knowledge scratch documents.",
+      );
+    }
+
+    const sealedContent = path.join(
+      workspace,
+      "work/WORK-1/evidence/result.txt",
+    );
+    await writeFile(sealedContent, "New included result");
+    const changedSeal = JSON.parse(
+      (
+        await execFileWithInput(
+          adapter,
+          ["stop"],
+          options,
+          JSON.stringify({ cwd: workspace, hook_event_name: "Stop" }),
+        )
+      ).stdout,
+    );
+    if (
+      changedSeal.decision !== "block" ||
+      !changedSeal.reason?.includes("AIO-DONE-INVALIDATED")
+    )
+      throw new Error(
+        "Installed Stop must still detect changes to included completion content.",
+      );
+    await execFileAsync(
+      cli,
+      [
+        "--root",
+        workspace,
+        "work",
+        "move",
+        "WORK-1",
+        "active",
+        "--reopen-reason",
+        "Review included result",
+      ],
+      options,
+    );
+    await execFileAsync(
+      cli,
+      ["--root", workspace, "work", "move", "WORK-1", "done"],
+      options,
+    );
+
     const workView = path.join(workspace, "views", "open.md");
     await rm(workView);
     const blocked = JSON.parse(

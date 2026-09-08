@@ -1,4 +1,4 @@
-import { lstat, readdir, readFile } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   type KnowledgeEntry,
@@ -6,6 +6,7 @@ import {
   parseKnowledgeDocument,
   type ValidationIssue,
 } from "@aiongside/core";
+import { ManagedFiles } from "./gitignore.js";
 
 export const INDEX_SOURCE =
   "# Knowledge index\n\n<!-- Link each direct file and folder with a short description of when to read it. Keep knowledge content in separate documents. -->\n";
@@ -117,13 +118,17 @@ export async function validateDocumentLinks(
   return issues;
 }
 
-export async function scanKnowledge(root: string): Promise<KnowledgeScan> {
+export async function scanKnowledge(
+  root: string,
+  files = new ManagedFiles(root),
+): Promise<KnowledgeScan> {
   const result: KnowledgeScan = {
     entries: [],
     issues: [],
     documents: new Map(),
   };
   const knowledgeRoot = path.join(root, "knowledge");
+  if (!(await files.includes(knowledgeRoot, true))) return result;
   if ((await safePathKind(root, knowledgeRoot)) !== "directory") {
     result.issues.push({
       code: "AIO-STRUCTURE-KNOWLEDGE",
@@ -135,15 +140,16 @@ export async function scanKnowledge(root: string): Promise<KnowledgeScan> {
   }
   const visit = async (directory: string): Promise<void> => {
     // Read the directory once; index coverage uses the same snapshot.
-    const children = await readdir(directory, { withFileTypes: true });
+    const children = await files.entries(directory);
     children.sort((a, b) => a.name.localeCompare(b.name));
     const indexPath = path.join(directory, "index.md");
     const indexRelative = relativePath(root, indexPath);
     let indexSource: string | undefined;
-    if ((await safePathKind(root, indexPath)) === "file") {
+    const includeIndex = await files.includes(indexPath);
+    if (includeIndex && (await safePathKind(root, indexPath)) === "file") {
       indexSource = await readFile(indexPath, "utf8");
       result.documents.set(indexRelative, indexSource);
-    } else {
+    } else if (includeIndex) {
       result.issues.push({
         code: "AIO-KNOWLEDGE-INDEX-MISSING",
         path: indexRelative,
@@ -248,20 +254,27 @@ export async function scanKnowledge(root: string): Promise<KnowledgeScan> {
 
 export async function workMarkdownDocuments(
   root: string,
+  files = new ManagedFiles(root),
 ): Promise<Map<string, string>> {
   const documents = new Map<string, string>();
   const visit = async (directory: string): Promise<void> => {
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
+    for (const entry of await files.entries(directory)) {
       const target = path.join(directory, entry.name);
-      if (entry.isDirectory()) await visit(target);
-      else if (entry.isFile() && entry.name.toLowerCase().endsWith(".md"))
+      if (entry.isDirectory()) {
+        await visit(target);
+      } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".md"))
         documents.set(
           relativePath(root, target),
           await readFile(target, "utf8"),
         );
     }
   };
-  if ((await safePathKind(root, path.join(root, "work"))) === "directory")
-    await visit(path.join(root, "work"));
+  const workRoot = path.join(root, "work");
+  if (
+    (await files.includes(workRoot, true)) &&
+    (await safePathKind(root, workRoot)) === "directory"
+  ) {
+    await visit(workRoot);
+  }
   return documents;
 }
