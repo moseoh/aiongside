@@ -141,13 +141,22 @@ export async function smokePackage(tarball) {
       adapter,
       ["session-start"],
       options,
-      JSON.stringify({ cwd: workspace, hook_event_name: "SessionStart" }),
+      JSON.stringify({
+        session_id: "package-smoke",
+        source: "startup",
+        cwd: workspace,
+        hook_event_name: "SessionStart",
+      }),
     );
     const stopped = await execFileWithInput(
       adapter,
       ["stop"],
       options,
-      JSON.stringify({ cwd: workspace, hook_event_name: "Stop" }),
+      JSON.stringify({
+        session_id: "package-smoke",
+        cwd: workspace,
+        hook_event_name: "Stop",
+      }),
     );
 
     if (!help.stdout.includes("Usage: aiongside")) {
@@ -281,7 +290,11 @@ export async function smokePackage(tarball) {
       adapter,
       ["stop"],
       options,
-      JSON.stringify({ cwd: workspace, hook_event_name: "Stop" }),
+      JSON.stringify({
+        session_id: "package-smoke",
+        cwd: workspace,
+        hook_event_name: "Stop",
+      }),
     );
     if (filteredStop.stdout !== "{}\n") {
       throw new Error(
@@ -300,7 +313,11 @@ export async function smokePackage(tarball) {
           adapter,
           ["stop"],
           options,
-          JSON.stringify({ cwd: workspace, hook_event_name: "Stop" }),
+          JSON.stringify({
+            session_id: "package-smoke",
+            cwd: workspace,
+            hook_event_name: "Stop",
+          }),
         )
       ).stdout,
     );
@@ -339,7 +356,11 @@ export async function smokePackage(tarball) {
           adapter,
           ["stop"],
           options,
-          JSON.stringify({ cwd: workspace, hook_event_name: "Stop" }),
+          JSON.stringify({
+            session_id: "package-smoke",
+            cwd: workspace,
+            hook_event_name: "Stop",
+          }),
         )
       ).stdout,
     );
@@ -351,6 +372,7 @@ export async function smokePackage(tarball) {
           options,
           JSON.stringify({
             cwd: workspace,
+            session_id: "package-smoke",
             hook_event_name: "Stop",
             stop_hook_active: true,
           }),
@@ -423,7 +445,11 @@ export async function smokePackage(tarball) {
           adapter,
           ["stop"],
           options,
-          JSON.stringify({ cwd: workspace, hook_event_name: "Stop" }),
+          JSON.stringify({
+            session_id: "package-smoke",
+            cwd: workspace,
+            hook_event_name: "Stop",
+          }),
         )
       ).stdout,
     );

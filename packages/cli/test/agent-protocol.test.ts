@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   createSessionStartHookOutput,
   createStopHookOutput,
+  formatHookScope,
   parseAgentHookEvent,
   parseCliResult,
 } from "../src/agent-protocol.js";
@@ -62,6 +63,49 @@ describe("official agent protocol fixtures", () => {
         "SessionStart",
       ),
     ).toThrow();
+  });
+  test("requires a session id and a documented SessionStart source", () => {
+    const valid = {
+      session_id: "session",
+      cwd: "/workspace",
+      hook_event_name: "SessionStart",
+      source: "startup",
+    };
+    expect(
+      parseAgentHookEvent(JSON.stringify(valid), "SessionStart"),
+    ).toMatchObject(valid);
+    for (const patch of [
+      { session_id: undefined },
+      { session_id: " " },
+      { source: undefined },
+      { source: "unknown" },
+    ])
+      expect(() =>
+        parseAgentHookEvent(
+          JSON.stringify({ ...valid, ...patch }),
+          "SessionStart",
+        ),
+      ).toThrow();
+  });
+  test("scopes recovery commands while preserving the original issue", () => {
+    const root = "/workspace team's $(literal)";
+    const scope = formatHookScope(root);
+    expect(scope).toContain(
+      "aiongside --root '/workspace team'\\''s $(literal)'",
+    );
+    const issue = {
+      code: "AIO-VIEW-DRIFT",
+      path: "views/open.md",
+      message: "Changed view.",
+      hint: "Run aiongside view sync.",
+    };
+    for (const retry of [false, true]) {
+      const output = createStopHookOutput([issue], retry, root);
+      const text = String(retry ? output.systemMessage : output.reason);
+      expect(text).toContain(scope);
+      for (const field of Object.values(issue)) expect(text).toContain(field);
+    }
+    expect(createStopHookOutput([], false, root)).toEqual({});
   });
   test("rejects execution failures, broken JSON, malformed issues and exit-code contradictions", () => {
     const success = { version: 1, root: "/workspace", ok: true, issues: [] };

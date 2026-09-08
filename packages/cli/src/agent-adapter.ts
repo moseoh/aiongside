@@ -9,9 +9,15 @@ import {
   createSessionStartHookOutput,
   createStopHookOutput,
   formatHookIssues,
+  formatHookScope,
   parseAgentHookEvent,
   parseCliResult,
 } from "./agent-protocol.js";
+import {
+  assertHookRoot,
+  HookSessionError,
+  resolveHookSession,
+} from "./hook-session.js";
 import { collectUpdateNotices, formatUpdateNotices } from "./update-notices.js";
 
 async function execute(command: "context" | "check", cwd: string) {
@@ -48,6 +54,7 @@ async function execute(command: "context" | "check", cwd: string) {
 }
 
 let event: AgentEvent | undefined;
+let root: string | undefined;
 try {
   const expected =
     process.argv[2] === "session-start"
@@ -60,11 +67,15 @@ try {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
   event = parseAgentHookEvent(Buffer.concat(chunks).toString("utf8"), expected);
+  root = await resolveHookSession(event);
   const executed = await execute(
     expected === "SessionStart" ? "context" : "check",
-    event.cwd,
+    root,
   );
+  await assertHookRoot(root);
   const result = parseCliResult(executed.stdout, executed.code);
+  if (result.root !== root)
+    throw new HookSessionError("CLI returned a different workspace root.");
   if (expected === "SessionStart") {
     const notices = await collectUpdateNotices({
       root: result.root,
@@ -83,6 +94,7 @@ try {
         createSessionStartHookOutput(
           [
             "# AIongside managed instructions",
+            formatHookScope(root),
             result.instructions ?? "",
             formatHookIssues(result.issues),
             formatUpdateNotices(notices),
@@ -92,7 +104,7 @@ try {
     );
   } else {
     process.stdout.write(
-      `${JSON.stringify(createStopHookOutput(result.issues, event.stop_hook_active === true))}\n`,
+      `${JSON.stringify(createStopHookOutput(result.issues, event.stop_hook_active === true, root))}\n`,
     );
   }
 } catch (error) {
@@ -100,16 +112,35 @@ try {
   if (event) {
     const issues = [
       {
-        code: "AIO-ADAPTER-EXECUTION",
-        path: event.cwd,
+        code:
+          error instanceof HookSessionError
+            ? "AIO-ADAPTER-SESSION"
+            : "AIO-ADAPTER-EXECUTION",
+        path: root ?? "session",
         message: `AIongside CLI execution failed: ${message}`,
-        hint: "Run aiongside check --json and aiongside doctor --json to inspect the failure.",
+        hint:
+          root && !(error instanceof HookSessionError)
+            ? "Run aiongside check --json and aiongside doctor --json to inspect the failure."
+            : "Start a new agent session in the intended AIongside workspace. Do not repair documents based on this failed Hook.",
       },
     ];
     const output =
       event.hook_event_name === "Stop"
-        ? createStopHookOutput(issues, event.stop_hook_active === true)
-        : createSessionStartHookOutput(formatHookIssues(issues));
+        ? createStopHookOutput(
+            issues,
+            event.stop_hook_active === true,
+            error instanceof HookSessionError ? undefined : root,
+          )
+        : createSessionStartHookOutput(
+            [
+              root && !(error instanceof HookSessionError)
+                ? formatHookScope(root)
+                : "",
+              formatHookIssues(issues),
+            ]
+              .filter(Boolean)
+              .join("\n\n"),
+          );
     process.stdout.write(`${JSON.stringify(output)}\n`);
   } else {
     process.stderr.write(`AIO-ADAPTER-INPUT: ${message}\n`);

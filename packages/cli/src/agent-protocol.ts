@@ -1,7 +1,9 @@
 import type { ValidationIssue } from "@aiongside/core";
 
 export interface AgentEvent {
+  session_id: string;
   cwd: string;
+  source?: "startup" | "resume" | "clear" | "compact";
   hook_event_name: "SessionStart" | "Stop";
   stop_hook_active?: boolean;
 }
@@ -14,15 +16,23 @@ export function parseAgentHookEvent(
   if (
     !event ||
     typeof event !== "object" ||
+    !("session_id" in event) ||
+    typeof event.session_id !== "string" ||
+    !event.session_id.trim() ||
+    event.session_id.length > 1024 ||
     !("cwd" in event) ||
     typeof event.cwd !== "string" ||
     !event.cwd.trim() ||
+    (expected === "SessionStart" &&
+      (!("source" in event) ||
+        typeof event.source !== "string" ||
+        !["startup", "resume", "clear", "compact"].includes(event.source))) ||
     !("hook_event_name" in event) ||
     event.hook_event_name !== expected ||
     ("stop_hook_active" in event && typeof event.stop_hook_active !== "boolean")
   ) {
     throw new Error(
-      "Invalid hook input: expected cwd and matching hook_event_name.",
+      "Invalid hook input: expected session_id, cwd, matching hook_event_name and a valid SessionStart source.",
     );
   }
   return event as AgentEvent;
@@ -43,12 +53,20 @@ export function createSessionStartHookOutput(additionalContext: string) {
   };
 }
 
+export function formatHookScope(root: string): string {
+  const quoted = `'${root.replaceAll("'", "'\\''")}'`;
+  return `AIongside session workspace: ${JSON.stringify(root)}\nResolve all document paths below against this workspace, regardless of the current shell directory. For every AIongside command below, use the prefix aiongside --root ${quoted} instead of bare aiongside. Example: aiongside --root ${quoted} check --json. Do not repair another workspace in response to this Hook.`;
+}
+
 export function createStopHookOutput(
   issues: ValidationIssue[],
   stopHookActive: boolean,
+  root?: string,
 ): Record<string, unknown> {
   if (!issues.length) return {};
-  const details = formatHookIssues(issues);
+  const details = [root ? formatHookScope(root) : "", formatHookIssues(issues)]
+    .filter(Boolean)
+    .join("\n\n");
   return stopHookActive
     ? {
         systemMessage: `AIongside check remains unresolved after one recovery turn. Report these issues:\n${details}`,
