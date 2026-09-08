@@ -218,7 +218,22 @@ try {
     0,
   );
 
-  // 5. Markdown: no scripts, no remote images, link policy.
+  // 5. Keyboard: Right expands, Down moves, Enter opens; then Markdown policy.
+  await tree.locator('[data-tree-path="work/WORK-1/deliverables"]').focus();
+  await page.keyboard.press("ArrowRight");
+  await tree.getByText("invitation.md", { exact: true }).waitFor();
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  await heading("Invitation");
+  assert.equal(await tree.getByRole("treeitem", { selected: true }).count(), 1);
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.press("ArrowLeft");
+  await page.waitForFunction(
+    () =>
+      !document.querySelector(
+        '[data-tree-path="work/WORK-1/deliverables/invitation.md"]',
+      ),
+  );
   await tree.locator('[data-tree-path="work/WORK-1/deliverables"]').click();
   await tree.getByText("invitation.md", { exact: true }).click();
   await heading("Invitation");
@@ -259,6 +274,15 @@ try {
   await ktree.getByRole("link", { name: "events" }).click();
   await page.waitForURL(/\/knowledge\/events$/);
   await heading("Events");
+  // Visiting rooms.md earlier revealed its folder; the chevron collapses then expands.
+  await ktree.getByText("Rooms", { exact: true }).waitFor();
+  await ktree.getByRole("button", { name: "events" }).click();
+  await page.waitForFunction(
+    () =>
+      !document.querySelector(
+        '[data-testid="knowledge-tree"] [data-tree-path="knowledge/events/rooms.md"]',
+      ),
+  );
   await ktree.getByRole("button", { name: "events" }).click();
   await ktree.getByText("Rooms", { exact: true }).waitFor();
   await page.getByTestId("knowledge-search").fill("venue");

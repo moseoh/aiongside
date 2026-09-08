@@ -5,8 +5,8 @@ import {
   FileIcon,
   FolderIcon,
 } from "lucide-react";
-import { useEffect, useState } from "react";
-import { Link } from "react-router";
+import { useEffect, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router";
 import { Button } from "@/components/ui/button";
 import {
   api,
@@ -43,31 +43,18 @@ interface Row {
 function TreeRow({
   row,
   onToggle,
+  tabIndex,
 }: {
   row: Row;
   onToggle?: (() => void) | undefined;
+  tabIndex: number;
 }) {
   const { t } = useT();
-  const className = cn(
-    "flex h-[30px] shrink-0 items-center gap-2 rounded-md pr-2 text-[13px] hover:bg-accent",
-    row.kind === "directory" && "text-muted-foreground",
-    row.selected && "bg-muted font-medium text-foreground",
-    row.error && "text-destructive",
-  );
-  const style = { paddingLeft: 8 + row.depth * 16 };
-  const content = (
+  const navigate = useNavigate();
+  const directory = row.kind === "directory";
+  const label = (
     <>
-      {row.kind === "directory" ? (
-        <ChevronRightIcon
-          className={cn(
-            "size-3 shrink-0 transition-transform",
-            row.open && "rotate-90",
-          )}
-        />
-      ) : (
-        <span className="size-3 shrink-0" />
-      )}
-      {row.kind === "directory" ? (
+      {directory ? (
         <FolderIcon className="size-4 shrink-0" />
       ) : (
         <FileIcon className="size-4 shrink-0" />
@@ -80,20 +67,39 @@ function TreeRow({
       ) : null}
     </>
   );
-  if (row.kind === "directory" && onToggle && row.to)
-    return (
-      <div
-        className={cn(className, "pl-0")}
-        style={{ paddingLeft: 0 }}
-        data-tree-path={row.path}
-      >
+  return (
+    // biome-ignore lint/a11y/useKeyWithClickEvents: keyboard handling lives on the tree container
+    <div
+      role="treeitem"
+      aria-level={row.depth + 1}
+      aria-expanded={directory ? row.open : undefined}
+      aria-selected={row.selected}
+      tabIndex={tabIndex}
+      data-tree-path={row.path}
+      title={row.error ?? undefined}
+      className={cn(
+        "flex h-[30px] shrink-0 cursor-pointer items-center gap-2 rounded-md pr-2 text-[13px] outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring",
+        directory && "text-muted-foreground",
+        row.selected && "bg-muted font-medium text-foreground",
+        row.error && "text-destructive",
+        !row.to && !onToggle && "cursor-default",
+      )}
+      style={{ paddingLeft: 8 + row.depth * 16 }}
+      onClick={() => {
+        if (row.to) navigate(row.to);
+        else onToggle?.();
+      }}
+    >
+      {directory ? (
         <button
           type="button"
-          className="flex h-full shrink-0 cursor-pointer items-center pr-2"
-          style={style}
-          onClick={onToggle}
-          aria-expanded={row.open}
+          tabIndex={-1}
           aria-label={row.name}
+          className="flex h-full shrink-0 cursor-pointer items-center"
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggle?.();
+          }}
         >
           <ChevronRightIcon
             className={cn(
@@ -102,45 +108,123 @@ function TreeRow({
             )}
           />
         </button>
+      ) : (
+        <span className="size-3 shrink-0" />
+      )}
+      {row.to ? (
         <Link
           to={row.to}
-          className="flex h-full min-w-0 flex-1 items-center gap-2 pr-2"
+          tabIndex={-1}
           aria-current={row.selected ? "page" : undefined}
+          className="flex h-full min-w-0 flex-1 items-center gap-2"
+          onClick={(event) => event.stopPropagation()}
         >
-          <FolderIcon className="size-4 shrink-0" />
-          <span className="min-w-0 flex-1 truncate">{row.name}</span>
+          {label}
         </Link>
-      </div>
-    );
-  if (row.kind === "directory" && onToggle)
-    return (
-      <button
-        type="button"
-        className={cn(className, "w-full cursor-pointer text-left")}
-        style={style}
-        onClick={onToggle}
-        aria-expanded={row.open}
-        data-tree-path={row.path}
-      >
-        {content}
-      </button>
-    );
-  if (row.to)
-    return (
-      <Link
-        to={row.to}
-        className={className}
-        style={style}
-        aria-current={row.selected ? "page" : undefined}
-        data-tree-path={row.path}
-        title={row.error ?? undefined}
-      >
-        {content}
-      </Link>
-    );
+      ) : (
+        <span className="flex min-w-0 flex-1 items-center gap-2">{label}</span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Rows with roving focus and WAI-ARIA tree keyboard handling: arrows move,
+ * Right/Left expand or collapse, Enter or Space opens the row.
+ */
+function TreeList({
+  rows,
+  toggle,
+  label,
+  testId,
+  empty,
+}: {
+  rows: Row[];
+  toggle: (path: string) => void;
+  label: string;
+  testId?: string;
+  empty?: React.ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const navigate = useNavigate();
+  const focusable = Math.max(
+    0,
+    rows.findIndex((row) => row.selected),
+  );
+  const focusRow = (index: number) => {
+    const row = rows[index];
+    if (!row) return;
+    ref.current
+      ?.querySelector<HTMLElement>(`[data-tree-path="${CSS.escape(row.path)}"]`)
+      ?.focus();
+  };
+  const onKeyDown = (event: React.KeyboardEvent) => {
+    const path = (event.target as HTMLElement)
+      .closest("[data-tree-path]")
+      ?.getAttribute("data-tree-path");
+    const index = rows.findIndex((row) => row.path === path);
+    const row = rows[index];
+    if (!row) return;
+    const directory = row.kind === "directory";
+    switch (event.key) {
+      case "ArrowDown":
+        focusRow(Math.min(rows.length - 1, index + 1));
+        break;
+      case "ArrowUp":
+        focusRow(Math.max(0, index - 1));
+        break;
+      case "Home":
+        focusRow(0);
+        break;
+      case "End":
+        focusRow(rows.length - 1);
+        break;
+      case "ArrowRight":
+        if (directory && !row.open) toggle(row.path);
+        else if (directory && rows[index + 1]?.depth === row.depth + 1)
+          focusRow(index + 1);
+        break;
+      case "ArrowLeft":
+        if (directory && row.open) toggle(row.path);
+        else {
+          for (let i = index - 1; i >= 0; i--)
+            if ((rows[i]?.depth ?? 0) < row.depth) {
+              focusRow(i);
+              break;
+            }
+        }
+        break;
+      case "Enter":
+      case " ":
+        if (row.to) navigate(row.to);
+        else if (directory) toggle(row.path);
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+  };
   return (
-    <div className={className} style={style} data-tree-path={row.path}>
-      {content}
+    <div
+      ref={ref}
+      role="tree"
+      aria-label={label}
+      data-testid={testId}
+      className="flex min-h-0 flex-col gap-px overflow-auto"
+      onKeyDown={onKeyDown}
+    >
+      {rows.length
+        ? rows.map((row, index) => (
+            <TreeRow
+              key={row.key}
+              row={row}
+              tabIndex={index === focusable ? 0 : -1}
+              onToggle={
+                row.kind === "directory" ? () => toggle(row.path) : undefined
+              }
+            />
+          ))
+        : empty}
     </div>
   );
 }
@@ -170,12 +254,15 @@ export function WorkFileTree({
   const [folders, setFolders] = useState<
     Record<string, { entries?: DirectoryEntry[]; error?: string }>
   >({});
-  const open = [
-    ...new Set([
-      ...expanded.filter((path) => path.startsWith(`${root}/`)),
-      ...ancestors(selected, root),
-    ]),
-  ];
+  const open = expanded.filter((path) => path.startsWith(`${root}/`));
+  // Reveal a file opened by URL once; the user can collapse its folders afterwards.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: runs only when the selection changes
+  useEffect(() => {
+    const missing = ancestors(selected, root).filter(
+      (path) => !expanded.includes(path),
+    );
+    if (missing.length) onExpandedChange([...expanded, ...missing]);
+  }, [selected]);
   const wanted = [root, ...open];
   const [loadedGeneration, setLoadedGeneration] = useState(generation);
   const stale = loadedGeneration !== generation;
@@ -284,20 +371,7 @@ export function WorkFileTree({
           )}
         </Button>
       </div>
-      <nav
-        className="flex min-h-0 flex-col gap-px overflow-auto"
-        aria-label={t("files")}
-      >
-        {rows.map((row) => (
-          <TreeRow
-            key={row.key}
-            row={row}
-            onToggle={
-              row.kind === "directory" ? () => toggle(row.path) : undefined
-            }
-          />
-        ))}
-      </nav>
+      <TreeList rows={rows} toggle={toggle} label={t("files")} />
     </div>
   );
 }
@@ -318,9 +392,14 @@ export function KnowledgeTree({
 }) {
   const { t } = useT();
   const query = filter.trim().toLowerCase();
-  const opened = [
-    ...new Set([...expanded, ...ancestors(selected, "knowledge")]),
-  ];
+  const opened = expanded;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: runs only when the selection changes
+  useEffect(() => {
+    const missing = ancestors(selected, "knowledge").filter(
+      (path) => !expanded.includes(path),
+    );
+    if (missing.length) onExpandedChange([...expanded, ...missing]);
+  }, [selected]);
   const rows: Row[] = [];
   const matches = (node: KnowledgeNode): boolean => {
     if (!query) return true;
@@ -374,26 +453,16 @@ export function KnowledgeTree({
         : [...opened, path],
     );
   return (
-    <nav
-      className="flex min-h-0 flex-col gap-px overflow-auto"
-      aria-label={t("knowledgeTree")}
-      data-testid="knowledge-tree"
-    >
-      {rows.length ? (
-        rows.map((row) => (
-          <TreeRow
-            key={row.key}
-            row={row}
-            onToggle={
-              row.kind === "directory" ? () => toggle(row.path) : undefined
-            }
-          />
-        ))
-      ) : (
+    <TreeList
+      rows={rows}
+      toggle={toggle}
+      label={t("knowledgeTree")}
+      testId="knowledge-tree"
+      empty={
         <p className="px-2 py-3 text-[13px] text-muted-foreground">
           {t("knowledgeEmpty")}
         </p>
-      )}
-    </nav>
+      }
+    />
   );
 }
