@@ -401,9 +401,8 @@ test("limits previews and sends active formats as attachment downloads", async (
     expect(download.headers.get("content-type")).toBe(
       "application/octet-stream",
     );
-    expect(Buffer.from(await download.arrayBuffer())).toEqual(
-      Buffer.from(value),
-    );
+    const downloaded = Buffer.from(await download.arrayBuffer());
+    expect(downloaded.equals(Buffer.from(value))).toBe(true);
   }
 });
 
