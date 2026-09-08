@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
 import {
   type AgentEvent,
   createSessionStartHookOutput,
@@ -13,11 +14,7 @@ import {
   parseAgentHookEvent,
   parseCliResult,
 } from "./agent-protocol.js";
-import {
-  assertHookRoot,
-  HookSessionError,
-  resolveHookSession,
-} from "./hook-session.js";
+import { assertHookRoot, HookRootError, resolveHookRoot } from "./hook-root.js";
 import { collectUpdateNotices, formatUpdateNotices } from "./update-notices.js";
 
 async function execute(command: "context" | "check", cwd: string) {
@@ -56,18 +53,26 @@ async function execute(command: "context" | "check", cwd: string) {
 let event: AgentEvent | undefined;
 let root: string | undefined;
 try {
+  const { values, positionals } = parseArgs({
+    args: process.argv.slice(2),
+    options: { root: { type: "string" } },
+    allowPositionals: true,
+    strict: true,
+  });
   const expected =
-    process.argv[2] === "session-start"
+    positionals[0] === "session-start"
       ? "SessionStart"
-      : process.argv[2] === "stop"
+      : positionals[0] === "stop"
         ? "Stop"
         : undefined;
-  if (!expected)
-    throw new Error("Usage: aiongside-agent-adapter <session-start|stop>");
+  if (!expected || positionals.length !== 1)
+    throw new Error(
+      "Usage: aiongside-agent-adapter <session-start|stop> [--root <path>]",
+    );
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
   event = parseAgentHookEvent(Buffer.concat(chunks).toString("utf8"), expected);
-  root = await resolveHookSession(event);
+  root = await resolveHookRoot(values.root);
   const executed = await execute(
     expected === "SessionStart" ? "context" : "check",
     root,
@@ -75,7 +80,7 @@ try {
   await assertHookRoot(root);
   const result = parseCliResult(executed.stdout, executed.code);
   if (result.root !== root)
-    throw new HookSessionError("CLI returned a different workspace root.");
+    throw new HookRootError("CLI returned a different workspace root.");
   if (expected === "SessionStart") {
     const notices = await collectUpdateNotices({
       root: result.root,
@@ -113,15 +118,15 @@ try {
     const issues = [
       {
         code:
-          error instanceof HookSessionError
-            ? "AIO-ADAPTER-SESSION"
+          error instanceof HookRootError
+            ? "AIO-ADAPTER-ROOT"
             : "AIO-ADAPTER-EXECUTION",
-        path: root ?? "session",
+        path: root ?? "workspace",
         message: `AIongside CLI execution failed: ${message}`,
         hint:
-          root && !(error instanceof HookSessionError)
+          root && !(error instanceof HookRootError)
             ? "Run aiongside check --json and aiongside doctor --json to inspect the failure."
-            : "Start a new agent session in the intended AIongside workspace. Do not repair documents based on this failed Hook.",
+            : "Check the Hook --root argument or its working directory. Run aiongside --root <workspace> doctor --json to inspect integration settings. Do not repair documents based on this failed Hook.",
       },
     ];
     const output =
@@ -129,11 +134,11 @@ try {
         ? createStopHookOutput(
             issues,
             event.stop_hook_active === true,
-            error instanceof HookSessionError ? undefined : root,
+            error instanceof HookRootError ? undefined : root,
           )
         : createSessionStartHookOutput(
             [
-              root && !(error instanceof HookSessionError)
+              root && !(error instanceof HookRootError)
                 ? formatHookScope(root)
                 : "",
               formatHookIssues(issues),

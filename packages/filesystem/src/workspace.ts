@@ -74,7 +74,7 @@ export const INTEGRATION_PATH = `${WORKSPACE_INTERNAL_DIR}/integration.json`;
 export const PROJECT_UPDATE_PREFERENCES_PATH = `${WORKSPACE_INTERNAL_DIR}/update-preferences.json`;
 const STAGING_DIR = `${WORKSPACE_INTERNAL_DIR}/staging`;
 const TRASH_DIR = `${WORKSPACE_INTERNAL_DIR}/trash`;
-export const INTEGRATION_VERSION = 5;
+export const INTEGRATION_VERSION = 6;
 const VIEW_PATHS = ["views/open.md", "views/closed.md"] as const;
 const SUPPORTING_CONTENT_DIRECTORIES = [
   { name: "references", code: "AIO-STRUCTURE-REFERENCES" },
@@ -2375,7 +2375,7 @@ async function planAgentHookTargets(root: string): Promise<ManagedFilePlan[]> {
     const previous = metadata ? await readFile(target, "utf8") : undefined;
     let next: string;
     try {
-      next = mergeAgentHookSettings(previous);
+      next = mergeAgentHookSettings(previous, relativePath);
     } catch (error) {
       throw hookConflict(root, target, errorMessage(error));
     }
@@ -2589,7 +2589,7 @@ export async function validateAgentIntegration(
       continue;
     }
     const hookSource = await readFile(target, "utf8");
-    if (!agentHookSettingsAreCurrent(hookSource)) {
+    if (!agentHookSettingsAreCurrent(hookSource, relativePath)) {
       issues.push({
         code: "AIO-HOOK-DRIFT",
         path: relativePath,

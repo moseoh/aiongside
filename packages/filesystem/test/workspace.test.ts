@@ -309,7 +309,7 @@ describe("workspace lifecycle", () => {
           {
             hooks: [
               {
-                command: "aiongside-agent-adapter stop",
+                command: 'aiongside-agent-adapter stop --root "$PWD"',
                 statusMessage: "Checking AIongside workspace",
                 timeout: 30,
                 type: "command",
@@ -321,7 +321,7 @@ describe("workspace lifecycle", () => {
           {
             hooks: [
               {
-                command: "aiongside-agent-adapter session-start",
+                command: 'aiongside-agent-adapter session-start --root "$PWD"',
                 statusMessage: "Loading AIongside instructions",
                 timeout: 10,
                 type: "command",
@@ -355,7 +355,7 @@ describe("workspace lifecycle", () => {
           "utf8",
         ),
       ),
-    ).toEqual({ schema: 1, version: 5 });
+    ).toEqual({ schema: 1, version: 6 });
     for (const target of [
       ".agents/skills/aiongside/SKILL.md",
       ".claude/skills/aiongside/SKILL.md",
@@ -484,7 +484,7 @@ describe("workspace lifecycle", () => {
           "utf8",
         ),
       ),
-    ).toEqual({ schema: 1, version: 5 });
+    ).toEqual({ schema: 1, version: 6 });
     expect(await validateAgentIntegration(root)).toEqual([]);
     expect(await validateWorkspace(root)).toEqual([]);
   });

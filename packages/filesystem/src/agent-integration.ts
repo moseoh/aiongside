@@ -10,33 +10,45 @@ export const AGENT_HOOK_PATHS = [
   ".codex/hooks.json",
 ] as const;
 
-const MANAGED_HOOK_ENTRIES = {
-  SessionStart: {
-    matcher: "startup|resume|clear|compact",
-    hooks: [
-      {
-        type: "command",
-        command: AGENT_HOOK_COMMANDS.sessionStart,
-        timeout: 10,
-        statusMessage: "Loading AIongside instructions",
-      },
-    ],
-  },
-  Stop: {
-    hooks: [
-      {
-        type: "command",
-        command: AGENT_HOOK_COMMANDS.stop,
-        timeout: 30,
-        statusMessage: "Checking AIongside workspace",
-      },
-    ],
-  },
-} as const;
+type HookTarget = (typeof AGENT_HOOK_PATHS)[number];
 
-type HookEventName = keyof typeof MANAGED_HOOK_ENTRIES;
+function managedHookEntries(target: HookTarget) {
+  const rootArgument =
+    target === ".claude/settings.json"
+      ? ' --root "$CLAUDE_PROJECT_DIR"'
+      : ' --root "$PWD"';
+  return {
+    SessionStart: {
+      matcher: "startup|resume|clear|compact",
+      hooks: [
+        {
+          type: "command",
+          command: AGENT_HOOK_COMMANDS.sessionStart + rootArgument,
+          timeout: 10,
+          statusMessage: "Loading AIongside instructions",
+        },
+      ],
+    },
+    Stop: {
+      hooks: [
+        {
+          type: "command",
+          command: AGENT_HOOK_COMMANDS.stop + rootArgument,
+          timeout: 30,
+          statusMessage: "Checking AIongside workspace",
+        },
+      ],
+    },
+  } as const;
+}
 
-export function mergeAgentHookSettings(source?: string): string {
+type HookEventName = "SessionStart" | "Stop";
+
+export function mergeAgentHookSettings(
+  source?: string,
+  target: HookTarget = ".codex/hooks.json",
+): string {
+  const managed = managedHookEntries(target);
   const root = source === undefined ? {} : parseSettings(source);
   const existingHooks = root.hooks;
   if (existingHooks !== undefined && !isRecord(existingHooks)) {
@@ -49,12 +61,12 @@ export function mergeAgentHookSettings(source?: string): string {
       throw new Error(`${registeredEvent} hooks must be a JSON array.`);
     }
     for (const entry of entries) {
-      for (const eventName of Object.keys(
-        MANAGED_HOOK_ENTRIES,
-      ) as HookEventName[]) {
+      for (const eventName of Object.keys(managed) as HookEventName[]) {
         if (
           registeredEvent !== eventName &&
-          entryCommands(entry).includes(managedCommand(eventName))
+          entryCommands(entry).some((command) =>
+            isManagedCommand(command, eventName),
+          )
         ) {
           throw new Error(
             `${managedCommand(eventName)} is registered under ${registeredEvent}.`,
@@ -64,9 +76,7 @@ export function mergeAgentHookSettings(source?: string): string {
     }
   }
   let changed = existingHooks === undefined;
-  for (const eventName of Object.keys(
-    MANAGED_HOOK_ENTRIES,
-  ) as HookEventName[]) {
+  for (const eventName of Object.keys(managed) as HookEventName[]) {
     const command = managedCommand(eventName);
     const current = hooks[eventName];
     if (current !== undefined && !Array.isArray(current)) {
@@ -76,8 +86,8 @@ export function mergeAgentHookSettings(source?: string): string {
     const managedIndices: number[] = [];
     for (const [index, entry] of entries.entries()) {
       const commands = entryCommands(entry);
-      if (commands.includes(command)) {
-        if (!isCompatibleManagedEntry(entry, command)) {
+      if (commands.some((value) => isManagedCommand(value, eventName))) {
+        if (!isCompatibleManagedEntry(entry, eventName)) {
           throw new Error(
             `${eventName} contains an incompatible ${command} hook entry.`,
           );
@@ -86,7 +96,7 @@ export function mergeAgentHookSettings(source?: string): string {
       }
     }
 
-    const canonical = MANAGED_HOOK_ENTRIES[eventName];
+    const canonical = managed[eventName];
     if (
       managedIndices.length === 1 &&
       deepEqual(entries[managedIndices[0] ?? -1], canonical)
@@ -117,9 +127,12 @@ export function mergeAgentHookSettings(source?: string): string {
   return `${JSON.stringify({ ...root, hooks }, null, 2)}\n`;
 }
 
-export function agentHookSettingsAreCurrent(source: string): boolean {
+export function agentHookSettingsAreCurrent(
+  source: string,
+  target: HookTarget = ".codex/hooks.json",
+): boolean {
   try {
-    return mergeAgentHookSettings(source) === source;
+    return mergeAgentHookSettings(source, target) === source;
   } catch {
     return false;
   }
@@ -134,7 +147,14 @@ function parseSettings(source: string): Record<string, unknown> {
 }
 
 function managedCommand(eventName: HookEventName): string {
-  return MANAGED_HOOK_ENTRIES[eventName].hooks[0].command;
+  return eventName === "SessionStart"
+    ? AGENT_HOOK_COMMANDS.sessionStart
+    : AGENT_HOOK_COMMANDS.stop;
+}
+
+function isManagedCommand(command: string, eventName: HookEventName): boolean {
+  const base = managedCommand(eventName);
+  return command === base || command.startsWith(`${base} `);
 }
 
 function entryCommands(entry: unknown): string[] {
@@ -146,7 +166,10 @@ function entryCommands(entry: unknown): string[] {
   );
 }
 
-function isCompatibleManagedEntry(entry: unknown, command: string): boolean {
+function isCompatibleManagedEntry(
+  entry: unknown,
+  eventName: HookEventName,
+): boolean {
   if (!isRecord(entry) || !Array.isArray(entry.hooks)) {
     return false;
   }
@@ -154,7 +177,17 @@ function isCompatibleManagedEntry(entry: unknown, command: string): boolean {
     return false;
   }
   const hook = entry.hooks[0];
-  return isRecord(hook) && hook.type === "command" && hook.command === command;
+  const knownCommands = [
+    managedCommand(eventName),
+    ...AGENT_HOOK_PATHS.map(
+      (target) => managedHookEntries(target)[eventName].hooks[0].command,
+    ),
+  ];
+  return (
+    isRecord(hook) &&
+    hook.type === "command" &&
+    knownCommands.includes(hook.command as string)
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

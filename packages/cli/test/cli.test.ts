@@ -5,7 +5,6 @@ import {
   mkdtemp,
   readdir,
   readFile,
-  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -77,7 +76,7 @@ async function snapshotFiles(root: string): Promise<Record<string, string>> {
   return files;
 }
 
-async function cli(args: string[], input?: string) {
+async function cli(args: string[], input?: string, cwd?: string) {
   if (!testUserRoot) {
     testUserRoot = await tempRoot();
     await mkdir(path.join(testUserRoot, "cache", "aiongside"), {
@@ -104,7 +103,7 @@ async function cli(args: string[], input?: string) {
     const child = execFile(
       runtime,
       [adapterBin, ...args],
-      { encoding: "utf8", env },
+      { encoding: "utf8", env, cwd },
       (error, stdout, stderr) => {
         if (error) {
           reject(Object.assign(error, { stdout, stderr }));
@@ -158,7 +157,7 @@ describe("CLI", () => {
     const root = await tempRoot();
     await cli(["init", root]);
     await cli(
-      ["session-start"],
+      ["session-start", "--root", root],
       JSON.stringify({
         session_id: root,
         source: "startup",
@@ -185,7 +184,7 @@ describe("CLI", () => {
     const stop = JSON.parse(
       (
         await cli(
-          ["stop"],
+          ["stop", "--root", root],
           JSON.stringify({
             session_id: root,
             cwd: root,
@@ -494,7 +493,7 @@ describe("CLI", () => {
     const nested = path.join(root, "work", "WORK-1");
 
     const result = await cli(
-      ["session-start"],
+      ["session-start", "--root", root],
       JSON.stringify({
         session_id: root,
         source: "startup",
@@ -540,7 +539,7 @@ describe("CLI", () => {
 
     await rm(path.join(root, ".aiongside", "instructions.md"));
     const missing = await cli(
-      ["session-start"],
+      ["session-start", "--root", root],
       JSON.stringify({
         session_id: root,
         source: "resume",
@@ -559,11 +558,60 @@ describe("CLI", () => {
     );
   });
 
+  test("doctor detects old hooks and workspace upgrade replaces them without duplicates", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    const targets = [".claude/settings.json", ".codex/hooks.json"];
+    for (const target of targets) {
+      const file = path.join(root, target);
+      const settings = JSON.parse(await readFile(file, "utf8"));
+      settings.permissions = { deny: ["Bash(aws ssm:*)"] };
+      for (const event of ["SessionStart", "Stop"])
+        settings.hooks[event][0].hooks[0].command =
+          settings.hooks[event][0].hooks[0].command.split(" --root")[0];
+      settings.hooks.Stop.push({
+        hooks: [{ type: "command", command: "team stop" }],
+      });
+      await writeFile(file, JSON.stringify(settings));
+    }
+    await writeFile(
+      path.join(root, ".aiongside/internal/integration.json"),
+      JSON.stringify({ schema: 1, version: 5 }),
+    );
+    const before = await cli(["--root", root, "doctor", "--json"]).catch(
+      (error) => error,
+    );
+    expect(before.code).toBe(1);
+    expect(
+      JSON.parse(before.stdout).issues.filter(
+        (issue: { code: string }) => issue.code === "AIO-HOOK-DRIFT",
+      ),
+    ).toHaveLength(2);
+    await cli(["--root", root, "workspace", "upgrade"]);
+    expect(
+      JSON.parse((await cli(["--root", root, "doctor", "--json"])).stdout).ok,
+    ).toBe(true);
+    for (const target of targets) {
+      const settings = JSON.parse(
+        await readFile(path.join(root, target), "utf8"),
+      );
+      expect(settings.permissions.deny).toEqual(["Bash(aws ssm:*)"]);
+      expect(settings.hooks.Stop).toHaveLength(2);
+      expect(settings.hooks.Stop[1].hooks[0].command).toBe("team stop");
+      expect(settings.hooks.Stop[0].hooks[0].command).toContain(
+        target.startsWith(".claude") ? "$CLAUDE_PROJECT_DIR" : "$PWD",
+      );
+    }
+    const snapshot = await snapshotFiles(root);
+    await cli(["--root", root, "workspace", "upgrade"]);
+    expect(await snapshotFiles(root)).toEqual(snapshot);
+  });
+
   test("allows a valid stop and blocks a failing check only once", async () => {
     const root = await tempRoot();
     await cli(["init", root]);
     await cli(
-      ["session-start"],
+      ["session-start", "--root", root],
       JSON.stringify({
         session_id: root,
         source: "startup",
@@ -576,23 +624,29 @@ describe("CLI", () => {
       cwd: root,
       hook_event_name: "Stop",
     });
-    expect(JSON.parse((await cli(["stop"], event)).stdout)).toEqual({});
+    expect(
+      JSON.parse((await cli(["stop", "--root", root], event)).stdout),
+    ).toEqual({});
     await writeFile(path.join(root, ".aiongside/instructions.md"), "# Drift\n");
-    expect(JSON.parse((await cli(["stop"], event)).stdout)).toEqual({});
+    expect(
+      JSON.parse((await cli(["stop", "--root", root], event)).stdout),
+    ).toEqual({});
     await writeFile(path.join(root, "views/open.md"), "# Drift\n");
     const check = await cli(["--root", root, "check", "--json"]).catch(
       (error) => error,
     );
     expect(check.code).toBe(1);
     const issue = JSON.parse(check.stdout).issues[0];
-    const blocked = JSON.parse((await cli(["stop"], event)).stdout);
+    const blocked = JSON.parse(
+      (await cli(["stop", "--root", root], event)).stdout,
+    );
     expect(blocked.decision).toBe("block");
     expect(blocked.reason).toContain(issue.message);
     expect(blocked.reason).toContain(issue.hint);
     const retry = JSON.parse(
       (
         await cli(
-          ["stop"],
+          ["stop", "--root", root],
           JSON.stringify({
             cwd: root,
             session_id: root,
@@ -609,7 +663,7 @@ describe("CLI", () => {
     const root = await tempRoot();
     await cli(["init", root]);
     await cli(
-      ["session-start"],
+      ["session-start", "--root", root],
       JSON.stringify({
         session_id: root,
         source: "startup",
@@ -623,7 +677,9 @@ describe("CLI", () => {
       cwd: root,
       hook_event_name: "Stop",
     });
-    const stopped = JSON.parse((await cli(["stop"], input)).stdout);
+    const stopped = JSON.parse(
+      (await cli(["stop", "--root", root], input)).stdout,
+    );
     expect(JSON.stringify(stopped)).toContain("AIO-KNOWLEDGE-INDEX-OMISSION");
     expect(JSON.stringify(stopped)).toContain("knowledge/index.md");
     expect(JSON.stringify(stopped)).not.toContain("knowledge sync");
@@ -641,7 +697,7 @@ describe("CLI", () => {
       ),
     ).toHaveLength(2);
     const repeated = await cli(
-      ["stop"],
+      ["stop", "--root", root],
       JSON.stringify({
         cwd: root,
         session_id: root,
@@ -658,13 +714,15 @@ describe("CLI", () => {
     const configPath = path.join(root, ".aiongside", "config.yaml");
     const before = await readFile(configPath, "utf8");
 
-    await expect(cli(["stop"], "not-json")).rejects.toMatchObject({
+    await expect(
+      cli(["stop", "--root", root], "not-json"),
+    ).rejects.toMatchObject({
       code: 2,
       stderr: expect.stringContaining("AIO-ADAPTER-INPUT"),
     });
     await expect(
       cli(
-        ["session-start"],
+        ["session-start", "--root", root],
         JSON.stringify({ cwd: root, hook_event_name: "Stop" }),
       ),
     ).rejects.toMatchObject({
@@ -685,7 +743,7 @@ describe("CLI", () => {
     const session_id = "stable-root";
     const start = (cwd: string, source: string) =>
       cli(
-        ["session-start"],
+        ["session-start", "--root", root],
         JSON.stringify({
           session_id,
           cwd,
@@ -695,7 +753,7 @@ describe("CLI", () => {
       );
     const stop = (cwd: string, stop_hook_active = false) =>
       cli(
-        ["stop"],
+        ["stop", "--root", root],
         JSON.stringify({
           session_id,
           cwd,
@@ -746,60 +804,104 @@ describe("CLI", () => {
     expect(await snapshotFiles(sessionFiles)).toEqual(bindings);
   }, 30_000);
 
-  test("reports missing binding or lost root instead of checking the current healthy workspace", async () => {
+  test("runs Stop and resume without startup or session cache; defaults to process cwd", async () => {
     const root = await tempRoot();
+    const legacy = path.join(root, ".legacy");
     await cli(["init", root]);
-    for (const retry of [false, true]) {
-      const stopped = JSON.parse(
+    await cli(["init", legacy]);
+    await writeFile(path.join(legacy, "views/open.md"), "# Legacy drift\n");
+    const before = await snapshotFiles(root);
+    const event = {
+      session_id: "no-binding",
+      cwd: legacy,
+      hook_event_name: "Stop",
+    };
+    expect(
+      JSON.parse((await cli(["stop"], JSON.stringify(event), root)).stdout),
+    ).toEqual({});
+    expect(
+      JSON.parse(
+        (await cli(["stop", "--root", ".."], JSON.stringify(event), legacy))
+          .stdout,
+      ),
+    ).toEqual({});
+    for (const source of ["resume", "compact"]) {
+      const result = JSON.parse(
         (
           await cli(
-            ["stop"],
+            ["session-start"],
             JSON.stringify({
-              session_id: "missing",
-              cwd: root,
-              hook_event_name: "Stop",
-              stop_hook_active: retry,
+              ...event,
+              hook_event_name: "SessionStart",
+              source,
             }),
+            root,
           )
         ).stdout,
       );
-      const message = retry ? stopped.systemMessage : stopped.reason;
-      expect(message).toContain("AIO-ADAPTER-SESSION");
-      expect(message).toContain("Start a new agent session");
-      expect(message).not.toContain("work sync");
-      expect(stopped.decision).toBe(retry ? undefined : "block");
+      expect(result.hookSpecificOutput.additionalContext).toContain(
+        JSON.stringify(root),
+      );
+      expect(result.hookSpecificOutput.additionalContext).not.toContain(
+        "AIO-ADAPTER-SESSION",
+      );
     }
-    const nested = path.join(root, "nested");
-    await cli(["init", nested]);
-    await cli(
-      ["session-start"],
-      JSON.stringify({
-        session_id: "lost-root",
-        source: "startup",
-        cwd: nested,
-        hook_event_name: "SessionStart",
-      }),
-    );
-    await rename(
-      path.join(nested, ".aiongside/config.yaml"),
-      path.join(nested, ".aiongside/config.saved"),
-    );
-    const lost = JSON.parse(
-      (
-        await cli(
-          ["stop"],
+    expect(await snapshotFiles(root)).toEqual(before);
+    expect(
+      await readdir(path.join(testUserRoot as string, "cache", "aiongside")),
+    ).toEqual(["update-check.json"]);
+  });
+
+  test("reports invalid explicit roots without checking a healthy cwd or requesting a new session", async () => {
+    const root = await tempRoot();
+    await cli(["init", root]);
+    for (const invalid of [
+      "",
+      path.join(root, "missing"),
+      path.join(root, ".aiongside/config.yaml"),
+    ]) {
+      for (const retry of [false, true]) {
+        const stopped = JSON.parse(
+          (
+            await cli(
+              ["stop", "--root", invalid],
+              JSON.stringify({
+                session_id: "old-session",
+                cwd: root,
+                hook_event_name: "Stop",
+                stop_hook_active: retry,
+              }),
+              root,
+            )
+          ).stdout,
+        );
+        const message = retry ? stopped.systemMessage : stopped.reason;
+        expect(message).toContain("AIO-ADAPTER-ROOT");
+        expect(message).not.toContain("Start a new agent session");
+        expect(message).not.toContain("work sync");
+        expect(stopped.decision).toBe(retry ? undefined : "block");
+      }
+    }
+    for (const args of [
+      ["stop", "--root"],
+      ["stop", "--agent", "codex"],
+      ["stop", "extra"],
+    ]) {
+      await expect(
+        cli(
+          args,
           JSON.stringify({
-            session_id: "lost-root",
+            session_id: root,
             cwd: root,
             hook_event_name: "Stop",
           }),
-        )
-      ).stdout,
-    );
-    expect(lost.decision).toBe("block");
-    expect(lost.reason).toContain("AIO-ADAPTER-SESSION");
-    expect(lost.reason).toContain("no longer available");
-    expect(lost.reason).not.toContain("--root");
+          root,
+        ),
+      ).rejects.toMatchObject({
+        code: 2,
+        stderr: expect.stringContaining("AIO-ADAPTER-INPUT"),
+      });
+    }
   });
 
   test("adds, removes, and safely repeats dependency commands", async () => {

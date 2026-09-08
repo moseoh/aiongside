@@ -139,7 +139,7 @@ export async function smokePackage(tarball) {
     }
     const sessionStarted = await execFileWithInput(
       adapter,
-      ["session-start"],
+      ["session-start", "--root", workspace],
       options,
       JSON.stringify({
         session_id: "package-smoke",
@@ -150,7 +150,7 @@ export async function smokePackage(tarball) {
     );
     const stopped = await execFileWithInput(
       adapter,
-      ["stop"],
+      ["stop", "--root", workspace],
       options,
       JSON.stringify({
         session_id: "package-smoke",
@@ -288,7 +288,7 @@ export async function smokePackage(tarball) {
     );
     const filteredStop = await execFileWithInput(
       adapter,
-      ["stop"],
+      ["stop", "--root", workspace],
       options,
       JSON.stringify({
         session_id: "package-smoke",
@@ -311,7 +311,7 @@ export async function smokePackage(tarball) {
       (
         await execFileWithInput(
           adapter,
-          ["stop"],
+          ["stop", "--root", workspace],
           options,
           JSON.stringify({
             session_id: "package-smoke",
@@ -354,7 +354,7 @@ export async function smokePackage(tarball) {
       (
         await execFileWithInput(
           adapter,
-          ["stop"],
+          ["stop", "--root", workspace],
           options,
           JSON.stringify({
             session_id: "package-smoke",
@@ -368,7 +368,7 @@ export async function smokePackage(tarball) {
       (
         await execFileWithInput(
           adapter,
-          ["stop"],
+          ["stop", "--root", workspace],
           options,
           JSON.stringify({
             cwd: workspace,
@@ -443,7 +443,7 @@ export async function smokePackage(tarball) {
       (
         await execFileWithInput(
           adapter,
-          ["stop"],
+          ["stop", "--root", workspace],
           options,
           JSON.stringify({
             session_id: "package-smoke",
