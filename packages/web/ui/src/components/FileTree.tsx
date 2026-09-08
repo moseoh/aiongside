@@ -49,7 +49,7 @@ function TreeRow({
 }) {
   const { t } = useT();
   const className = cn(
-    "flex h-[30px] items-center gap-2 rounded-md pr-2 text-[13px] hover:bg-accent",
+    "flex h-[30px] shrink-0 items-center gap-2 rounded-md pr-2 text-[13px] hover:bg-accent",
     row.kind === "directory" && "text-muted-foreground",
     row.selected && "bg-muted font-medium text-foreground",
     row.error && "text-destructive",
@@ -177,12 +177,17 @@ export function WorkFileTree({
     ]),
   ];
   const wanted = [root, ...open];
+  const [loadedGeneration, setLoadedGeneration] = useState(generation);
+  const stale = loadedGeneration !== generation;
   const signature = `${generation}:${wanted.join("\n")}`;
+  // Fetch only folders not loaded yet; after Refresh re-read every open folder
+  // but keep the current rows until each response replaces them.
   // biome-ignore lint/correctness/useExhaustiveDependencies: signature covers wanted + generation
   useEffect(() => {
     let cancelled = false;
-    setFolders({});
-    for (const path of wanted) {
+    const missing = stale ? wanted : wanted.filter((path) => !folders[path]);
+    if (stale) setLoadedGeneration(generation);
+    for (const path of missing) {
       api
         .directory(path)
         .then((entries) => {

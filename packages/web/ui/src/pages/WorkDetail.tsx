@@ -50,7 +50,12 @@ export function WorkDetailPage() {
       return;
     }
     let cancelled = false;
-    setState({ status: "loading" });
+    // Only blank the page when the Work changes; a Refresh keeps the current one.
+    setState((prev) =>
+      prev.status === "ready" && prev.work.id === id
+        ? prev
+        : { status: "loading" },
+    );
     api
       .work(id)
       .then((work) => {
@@ -196,7 +201,7 @@ export function WorkDetailPage() {
                           <Link
                             key={key}
                             to={routeForPath(document.path) ?? "/knowledge"}
-                            className="flex h-[30px] items-center gap-2 rounded-md px-2 text-[13px] hover:bg-accent"
+                            className="flex h-[30px] shrink-0 items-center gap-2 rounded-md px-2 text-[13px] hover:bg-accent"
                           >
                             <BookOpenIcon className="size-4 shrink-0 text-muted-foreground" />
                             <span className="min-w-0 flex-1 truncate">
@@ -206,7 +211,7 @@ export function WorkDetailPage() {
                         ) : (
                           <div
                             key={key}
-                            className="flex h-[30px] items-center gap-2 px-2 text-[13px] text-muted-foreground"
+                            className="flex h-[30px] shrink-0 items-center gap-2 px-2 text-[13px] text-muted-foreground"
                             title={t("knowledgeMissing")}
                           >
                             <BookOpenIcon className="size-4 shrink-0" />

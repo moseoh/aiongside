@@ -344,7 +344,7 @@ export function WorkListPage() {
                       <Link
                         key={work.id}
                         to={`/work/${work.id}`}
-                        className="flex flex-col gap-2 rounded-lg border bg-card p-3 hover:border-ring"
+                        className="flex shrink-0 flex-col gap-2 rounded-lg border bg-card p-3 hover:border-ring"
                         data-testid="work-card"
                         data-work-id={work.id}
                       >

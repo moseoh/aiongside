@@ -4,10 +4,11 @@ import { Markdown } from "@/components/Markdown";
 import { api, type Document, errorMessage } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 
-type State =
-  | { status: "loading" }
-  | { status: "ready"; document: Document }
-  | { status: "error"; message: string };
+interface State {
+  loading: boolean;
+  document: Document | null;
+  error: string | null;
+}
 
 /** Fetches one workspace file when its path or the refresh generation changes. */
 export function DocumentView({
@@ -20,26 +21,36 @@ export function DocumentView({
   meta?: React.ReactNode;
 }) {
   const { t, size } = useT();
-  const [state, setState] = useState<State>({ status: "loading" });
+  const [state, setState] = useState<State>({
+    loading: true,
+    document: null,
+    error: null,
+  });
+  // Keep the previous document on screen while the next one loads, so
+  // switching files replaces content instead of flashing a loading state.
   // biome-ignore lint/correctness/useExhaustiveDependencies: generation forces a re-read after Refresh
   useEffect(() => {
     let cancelled = false;
-    setState({ status: "loading" });
+    setState((prev) => ({ ...prev, loading: true }));
     api
       .document(path)
       .then((document) => {
-        if (!cancelled) setState({ status: "ready", document });
+        if (!cancelled) setState({ loading: false, document, error: null });
       })
       .catch((error) => {
         if (!cancelled)
-          setState({ status: "error", message: errorMessage(error) });
+          setState({
+            loading: false,
+            document: null,
+            error: errorMessage(error),
+          });
       });
     return () => {
       cancelled = true;
     };
   }, [path, generation]);
 
-  const document = state.status === "ready" ? state.document : null;
+  const document = state.document;
   const kindLabel = document
     ? document.kind === "markdown"
       ? t("markdown")
@@ -74,28 +85,32 @@ export function DocumentView({
           <span>{t("download")}</span>
         </a>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto">
-        {state.status === "loading" ? (
-          <p className="p-6 text-sm text-muted-foreground">{t("loading")}</p>
-        ) : state.status === "error" ? (
+      <div
+        className="min-h-0 flex-1 overflow-auto transition-opacity"
+        style={{ opacity: state.loading && document ? 0.6 : 1 }}
+        aria-busy={state.loading}
+      >
+        {state.error ? (
           <p className="p-6 text-sm text-destructive" role="alert">
             {t("fileNotFound")}
             <span className="mt-1 block text-xs text-muted-foreground">
-              {state.message}
+              {state.error}
             </span>
           </p>
-        ) : state.document.kind === "markdown" ? (
+        ) : !document ? (
+          <p className="p-6 text-sm text-muted-foreground">{t("loading")}</p>
+        ) : document.kind === "markdown" ? (
           <article className="max-w-[760px] px-8 py-7">
-            <Markdown source={state.document.source} path={path} />
+            <Markdown source={document.source} path={document.path} />
           </article>
-        ) : state.document.kind === "text" ? (
+        ) : document.kind === "text" ? (
           <pre className="max-w-[760px] whitespace-pre-wrap px-8 py-7 font-mono text-[12.5px] leading-relaxed">
-            {state.document.source}
+            {document.source}
           </pre>
         ) : (
           <div className="p-6 text-sm text-muted-foreground">
             <p>
-              {state.document.size > 1024 * 1024
+              {document.size > 1024 * 1024
                 ? t("fileTooLarge")
                 : t("downloadOnly")}
             </p>

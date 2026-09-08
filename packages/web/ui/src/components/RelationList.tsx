@@ -31,7 +31,7 @@ export function RelationList({
             <Link
               key={item.work.id}
               to={`/work/${item.work.id}`}
-              className="flex h-9 items-center gap-2.5 rounded-md px-3 text-[13px] hover:bg-accent"
+              className="flex h-9 shrink-0 items-center gap-2.5 rounded-md px-3 text-[13px] hover:bg-accent"
             >
               <StatusDot status={item.work.status} />
               <span className="shrink-0 font-mono text-xs text-muted-foreground">
@@ -43,7 +43,7 @@ export function RelationList({
           ) : (
             <div
               key={item.id}
-              className="flex h-9 items-center gap-2.5 px-3 text-[13px] text-muted-foreground"
+              className="flex h-9 shrink-0 items-center gap-2.5 px-3 text-[13px] text-muted-foreground"
               title={item.message}
             >
               <span className="size-1.5 shrink-0 rounded-full border border-destructive" />
