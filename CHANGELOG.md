@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.5.1 - 2026-09-09
+
+### Changed
+
+- Web View documents scroll with the page; the header and file tree stay pinned, and long file trees scroll inside their own panel.
+- Managed agent instructions list common commands directly instead of routine `--help` traversal.
+
+### Existing workspaces
+
+Run `aiongside workspace upgrade` in each existing workspace to update managed instructions. Restart running Web View servers.
+
 ## 0.5.0 - 2026-09-08
 
 ### Added
