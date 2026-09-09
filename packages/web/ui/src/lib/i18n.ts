@@ -34,6 +34,8 @@ const en = {
   error: "Error",
   retry: "Retry",
   breadcrumbWork: "Work",
+  copyId: "Copy ID",
+  copiedId: "Copied",
   type: "Type",
   created: "Created",
   updated: "Updated",

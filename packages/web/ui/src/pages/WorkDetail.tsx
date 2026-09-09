@@ -1,4 +1,9 @@
-import { BookOpenIcon, ChevronRightIcon } from "lucide-react";
+import {
+  BookOpenIcon,
+  CheckIcon,
+  ChevronRightIcon,
+  CopyIcon,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 import { DocumentView } from "@/components/DocumentView";
@@ -7,6 +12,11 @@ import { Header } from "@/components/Header";
 import { type Relation, RelationList } from "@/components/RelationList";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { api, errorMessage, WORK_ID, type WorkDetail } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { flattenDocuments, useKnowledge } from "@/lib/knowledge";
@@ -18,6 +28,61 @@ type State =
   | { status: "loading" }
   | { status: "ready"; work: WorkDetail }
   | { status: "error"; message: string };
+
+/** Clipboard API needs a secure context; plain-HTTP hosts fall back to execCommand. */
+async function copyText(text: string): Promise<boolean> {
+  if (navigator.clipboard) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // fall through
+    }
+  }
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  document.body.append(area);
+  area.select();
+  const ok = document.execCommand("copy");
+  area.remove();
+  return ok;
+}
+
+/** Copies the Work ID to the clipboard; shows a check mark briefly after success. */
+function CopyIdButton({ id }: { id: string }) {
+  const { t } = useT();
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 1500);
+    return () => clearTimeout(timer);
+  }, [copied]);
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          variant="muted"
+          size="icon-sm"
+          aria-label={t("copyId")}
+          data-testid="copy-id"
+          onClick={() => {
+            void copyText(id).then((ok) => setCopied(ok));
+          }}
+        >
+          {copied ? (
+            <CheckIcon className="size-3.5 text-primary" />
+          ) : (
+            <CopyIcon className="size-3.5" />
+          )}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{copied ? t("copiedId") : t("copyId")}</TooltipContent>
+    </Tooltip>
+  );
+}
 
 function Meta({
   label,
@@ -112,6 +177,7 @@ export function WorkDetailPage() {
         <span className="font-mono text-sm font-medium" data-testid="detail-id">
           {id}
         </span>
+        {valid ? <CopyIdButton id={id} /> : null}
       </Header>
       <div className="flex flex-col gap-5 px-6 pt-6 pb-6">
         {state.status === "error" ? (

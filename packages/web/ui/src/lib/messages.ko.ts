@@ -35,6 +35,8 @@ export const messagesKo: Record<MessageKey, string> = {
   error: "오류",
   retry: "다시 시도",
   breadcrumbWork: "업무",
+  copyId: "ID 복사",
+  copiedId: "복사됨",
   type: "유형",
   created: "생성",
   updated: "갱신",
