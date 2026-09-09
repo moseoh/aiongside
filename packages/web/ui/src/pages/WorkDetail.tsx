@@ -1,11 +1,12 @@
 import {
+  ArrowRightIcon,
   BookOpenIcon,
   CheckIcon,
   ChevronRightIcon,
   CopyIcon,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router";
+import { Link, useParams, useSearchParams } from "react-router";
 import { DocumentView } from "@/components/DocumentView";
 import { WorkFileTree } from "@/components/FileTree";
 import { Header } from "@/components/Header";
@@ -13,11 +14,26 @@ import { type Relation, RelationList } from "@/components/RelationList";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { api, errorMessage, WORK_ID, type WorkDetail } from "@/lib/api";
+import {
+  api,
+  errorMessage,
+  WORK_ID,
+  type WorkDetail,
+  type WorkTransition,
+} from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { flattenDocuments, useKnowledge } from "@/lib/knowledge";
 import { routeForPath, workFilePath } from "@/lib/links";
@@ -84,6 +100,82 @@ function CopyIdButton({ id }: { id: string }) {
   );
 }
 
+const REASON_KEYS = [
+  "reopenReason",
+  "waitingReason",
+  "resumeWhen",
+  "waitingResolution",
+  "cancellationReason",
+] as const;
+
+/** Status changes newest first; free-text reasons are shown as label: value. */
+function HistoryTable({ transitions }: { transitions: WorkTransition[] }) {
+  const { t, dateTime } = useT();
+  if (!transitions.length)
+    return (
+      <p className="text-sm text-muted-foreground" data-testid="no-history">
+        {t("noHistory")}
+      </p>
+    );
+  const rows = transitions.map((item, index) => ({ item, index })).reverse();
+  return (
+    <div className="rounded-lg border bg-card" data-testid="history-table">
+      <Table>
+        <TableHeader>
+          <TableRow className="hover:bg-transparent">
+            <TableHead>{t("historyTime")}</TableHead>
+            <TableHead>{t("historyTransition")}</TableHead>
+            <TableHead className="w-full">{t("historyReason")}</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map(({ item, index }) => {
+            const reasons = REASON_KEYS.filter((key) => item[key]);
+            return (
+              <TableRow
+                key={`${index}-${item.at}`}
+                className="hover:bg-transparent"
+              >
+                <TableCell className="font-mono text-xs text-muted-foreground">
+                  {dateTime(item.at)}
+                </TableCell>
+                <TableCell>
+                  <span className="flex items-center gap-2">
+                    <StatusBadge status={item.from} />
+                    <ArrowRightIcon className="size-3.5 text-muted-foreground" />
+                    <StatusBadge status={item.to} />
+                  </span>
+                </TableCell>
+                <TableCell className="text-[13px] whitespace-normal">
+                  {reasons.length || item.completionInvalidated ? (
+                    <span className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                      {reasons.map((key) => (
+                        <span key={key}>
+                          <span className="text-muted-foreground">
+                            {t(key)}
+                          </span>{" "}
+                          {item[key]}
+                        </span>
+                      ))}
+                      {item.completionInvalidated ? (
+                        <span className="rounded-sm border px-1.5 text-[11px] text-destructive">
+                          {t("completionInvalidated")}
+                        </span>
+                      ) : null}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
 function Meta({
   label,
   children,
@@ -101,6 +193,8 @@ function Meta({
 
 export function WorkDetailPage() {
   const { id = "", "*": splat } = useParams();
+  const [search, setSearch] = useSearchParams();
+  const tab = search.get("tab") === "history" ? "history" : "detail";
   const { t, type, fullDate, date } = useT();
   const settings = useSettings();
   const works = useWorks();
@@ -222,79 +316,107 @@ export function WorkDetailPage() {
                 />
               </div>
             ) : null}
-            <div className="grid items-start grid-cols-[minmax(0,1fr)_240px] gap-5">
-              {isOverview && !work.overview ? (
-                <div
-                  className="flex flex-col items-start gap-3 rounded-lg border bg-card p-6 text-sm"
-                  data-testid="no-overview"
-                >
-                  <p className="text-muted-foreground">{t("noOverview")}</p>
-                  <Button asChild size="sm">
-                    <Link to={routeForPath(`work/${id}/record.md`) ?? "#"}>
-                      {t("openRecord")}
-                    </Link>
-                  </Button>
-                </div>
-              ) : (
-                <DocumentView path={filePath} generation={works.generation} />
-              )}
-              <div className="sticky top-20 flex max-h-[calc(100vh-104px)] flex-col gap-5">
-                <WorkFileTree
-                  root={`work/${id}`}
-                  selected={filePath}
-                  expanded={settings.expanded[id] ?? []}
-                  onExpandedChange={(paths) => setExpanded(id, paths)}
-                  showIgnored={settings.showIgnored}
-                  onShowIgnoredChange={(showIgnored) =>
-                    updateSettings({ showIgnored })
-                  }
-                  generation={works.generation}
-                />
-                {linkedKnowledge.length ? (
-                  <section
-                    className="flex flex-col gap-1.5"
-                    data-testid="linked-knowledge"
+            <Tabs
+              value={tab}
+              onValueChange={(value) => {
+                const next = new URLSearchParams(search);
+                if (value === "history") next.set("tab", "history");
+                else next.delete("tab");
+                setSearch(next, { replace: true });
+              }}
+              className="gap-4"
+            >
+              <TabsList>
+                <TabsTrigger value="detail" data-testid="tab-detail">
+                  {t("tabDetail")}
+                </TabsTrigger>
+                <TabsTrigger value="history" data-testid="tab-history">
+                  {t("tabHistory")}
+                  <span className="font-mono text-xs">
+                    {work.transitions.length}
+                  </span>
+                </TabsTrigger>
+              </TabsList>
+              <TabsContent value="history">
+                <HistoryTable transitions={work.transitions} />
+              </TabsContent>
+              <TabsContent
+                value="detail"
+                className="grid items-start grid-cols-[minmax(0,1fr)_240px] gap-5"
+              >
+                {isOverview && !work.overview ? (
+                  <div
+                    className="flex flex-col items-start gap-3 rounded-lg border bg-card p-6 text-sm"
+                    data-testid="no-overview"
                   >
-                    <h2 className="px-2 text-[11px] font-medium tracking-wide text-muted-foreground">
-                      {t("linkedKnowledge")}{" "}
-                      <span className="font-mono">
-                        {linkedKnowledge.length}
-                      </span>
-                    </h2>
-                    <div className="flex flex-col gap-px">
-                      {linkedKnowledge.map(({ key, document }) =>
-                        document ? (
-                          <Link
-                            key={key}
-                            to={routeForPath(document.path) ?? "/knowledge"}
-                            className="flex h-[30px] shrink-0 items-center gap-2 rounded-md px-2 text-[13px] hover:bg-accent"
-                          >
-                            <BookOpenIcon className="size-4 shrink-0 text-muted-foreground" />
-                            <span className="min-w-0 flex-1 truncate">
-                              {document.title}
-                            </span>
-                          </Link>
-                        ) : (
-                          <div
-                            key={key}
-                            className="flex h-[30px] shrink-0 items-center gap-2 px-2 text-[13px] text-muted-foreground"
-                            title={t("knowledgeMissing")}
-                          >
-                            <BookOpenIcon className="size-4 shrink-0" />
-                            <span className="min-w-0 flex-1 truncate font-mono text-xs">
-                              {key}
-                            </span>
-                            <span className="text-[11px] text-destructive">
-                              {t("knowledgeMissing")}
-                            </span>
-                          </div>
-                        ),
-                      )}
-                    </div>
-                  </section>
-                ) : null}
-              </div>
-            </div>
+                    <p className="text-muted-foreground">{t("noOverview")}</p>
+                    <Button asChild size="sm">
+                      <Link to={routeForPath(`work/${id}/record.md`) ?? "#"}>
+                        {t("openRecord")}
+                      </Link>
+                    </Button>
+                  </div>
+                ) : (
+                  <DocumentView path={filePath} generation={works.generation} />
+                )}
+                <div className="sticky top-20 flex max-h-[calc(100vh-104px)] flex-col gap-5">
+                  <WorkFileTree
+                    root={`work/${id}`}
+                    selected={filePath}
+                    expanded={settings.expanded[id] ?? []}
+                    onExpandedChange={(paths) => setExpanded(id, paths)}
+                    showIgnored={settings.showIgnored}
+                    onShowIgnoredChange={(showIgnored) =>
+                      updateSettings({ showIgnored })
+                    }
+                    generation={works.generation}
+                  />
+                  {linkedKnowledge.length ? (
+                    <section
+                      className="flex flex-col gap-1.5"
+                      data-testid="linked-knowledge"
+                    >
+                      <h2 className="px-2 text-[11px] font-medium tracking-wide text-muted-foreground">
+                        {t("linkedKnowledge")}{" "}
+                        <span className="font-mono">
+                          {linkedKnowledge.length}
+                        </span>
+                      </h2>
+                      <div className="flex flex-col gap-px">
+                        {linkedKnowledge.map(({ key, document }) =>
+                          document ? (
+                            <Link
+                              key={key}
+                              to={routeForPath(document.path) ?? "/knowledge"}
+                              className="flex h-[30px] shrink-0 items-center gap-2 rounded-md px-2 text-[13px] hover:bg-accent"
+                            >
+                              <BookOpenIcon className="size-4 shrink-0 text-muted-foreground" />
+                              <span className="min-w-0 flex-1 truncate">
+                                {document.title}
+                              </span>
+                            </Link>
+                          ) : (
+                            <div
+                              key={key}
+                              className="flex h-[30px] shrink-0 items-center gap-2 px-2 text-[13px] text-muted-foreground"
+                              title={t("knowledgeMissing")}
+                            >
+                              <BookOpenIcon className="size-4 shrink-0" />
+                              <span className="min-w-0 flex-1 truncate font-mono text-xs">
+                                {key}
+                              </span>
+                              <span className="text-[11px] text-destructive">
+                                {t("knowledgeMissing")}
+                              </span>
+                            </div>
+                          ),
+                        )}
+                      </div>
+                    </section>
+                  ) : null}
+                </div>
+              </TabsContent>
+            </Tabs>
           </>
         ) : state.status === "loading" ? (
           <p className="text-sm text-muted-foreground">{t("loading")}</p>

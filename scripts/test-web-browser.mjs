@@ -68,7 +68,7 @@ try {
     const id = `WORK-${index + 1}`;
     const extra =
       id === "WORK-1"
-        ? "needs:\n  - WORK-2\nknowledge:\n  - venue-rules\n  - missing-topic\n"
+        ? "needs:\n  - WORK-2\nknowledge:\n  - venue-rules\n  - missing-topic\ntransitions:\n  - at: 2026-09-02T10:12:00.000Z\n    from: inbox\n    to: active\n  - at: 2026-09-04T15:30:00.000Z\n    from: active\n    to: waiting\n    waitingReason: Venue capacity pending\n    resumeWhen: Venue replies\n  - at: 2026-09-07T09:05:00.000Z\n    from: waiting\n    to: active\n    waitingResolution: Venue confirmed\n"
         : id === "WORK-6"
           ? "needs:\n  - WORK-1\n"
           : "";
@@ -196,7 +196,22 @@ try {
   );
   const linked = await page.getByTestId("linked-knowledge").innerText();
   assert.ok(linked.includes("Venue rules") && linked.includes("missing-topic"));
+  // History tab lists transitions newest first with reasons; detail tab restores the tree.
+  assert.ok((await page.getByTestId("tab-history").innerText()).includes("3"));
+  await page.getByTestId("tab-history").click();
+  const history = page.getByTestId("history-table");
+  await history.waitFor();
+  const historyRows = history.locator("tbody tr");
+  assert.equal(await historyRows.count(), 3);
+  assert.ok((await historyRows.nth(0).innerText()).includes("Venue confirmed"));
+  assert.ok(
+    (await historyRows.nth(1).innerText()).includes("Venue capacity pending"),
+  );
+  assert.ok((await historyRows.nth(1).innerText()).includes("Venue replies"));
+  assert.equal(await page.getByTestId("file-tree").count(), 0);
+  await page.getByTestId("tab-detail").click();
   const tree = page.getByTestId("file-tree");
+  await tree.waitFor();
   assert.equal(
     await tree.getByText("node_modules", { exact: true }).count(),
     0,

@@ -36,6 +36,18 @@ const en = {
   breadcrumbWork: "Work",
   copyId: "Copy ID",
   copiedId: "Copied",
+  tabDetail: "Details",
+  tabHistory: "History",
+  historyTime: "Time",
+  historyTransition: "Transition",
+  historyReason: "Reason",
+  noHistory: "No status changes recorded.",
+  reopenReason: "Reopened",
+  waitingReason: "Waiting",
+  resumeWhen: "Resume when",
+  waitingResolution: "Resolved",
+  cancellationReason: "Cancelled",
+  completionInvalidated: "Completion invalidated",
   type: "Type",
   created: "Created",
   updated: "Updated",
@@ -167,6 +179,20 @@ export function formatFullDate(lang: Lang, iso: string): string {
   }).format(date);
 }
 
+/** ISO timestamp → local date and time, e.g. 2026-09-04 15:30. */
+export function formatDateTime(lang: Lang, iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return new Intl.DateTimeFormat(lang === "ko" ? "ko-KR" : "en-US", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
 export function formatElapsed(
   lang: Lang,
   from: number,
@@ -204,6 +230,7 @@ export function useT() {
     type: (type: string) => typeLabel(lang, type),
     date: (iso: string) => formatDate(lang, iso),
     fullDate: (iso: string) => formatFullDate(lang, iso),
+    dateTime: (iso: string) => formatDateTime(lang, iso),
     size: (bytes: number) => formatSize(lang, bytes),
   };
 }

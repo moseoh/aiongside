@@ -23,6 +23,18 @@ export const STATUS_ORDER: readonly WorkStatus[] = [
   "cancelled",
 ];
 
+export interface WorkTransition {
+  at: string;
+  from: WorkStatus;
+  to: WorkStatus;
+  reopenReason?: string;
+  waitingReason?: string;
+  resumeWhen?: string;
+  waitingResolution?: string;
+  cancellationReason?: string;
+  completionInvalidated?: boolean;
+}
+
 export interface Work {
   id: string;
   title: string;
@@ -32,6 +44,7 @@ export interface Work {
   updated: string;
   needs: string[];
   knowledge: string[];
+  transitions: WorkTransition[];
 }
 
 export interface WorkDetail extends Work {
