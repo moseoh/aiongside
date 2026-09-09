@@ -113,7 +113,7 @@ export function WorkDetailPage() {
           {id}
         </span>
       </Header>
-      <div className="flex min-h-0 flex-1 flex-col gap-5 px-6 pt-6 pb-6">
+      <div className="flex flex-col gap-5 px-6 pt-6 pb-6">
         {state.status === "error" ? (
           <div
             className="rounded-lg border bg-card p-6"
@@ -156,7 +156,7 @@ export function WorkDetailPage() {
                 />
               </div>
             ) : null}
-            <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_240px] gap-5">
+            <div className="grid items-start grid-cols-[minmax(0,1fr)_240px] gap-5">
               {isOverview && !work.overview ? (
                 <div
                   className="flex flex-col items-start gap-3 rounded-lg border bg-card p-6 text-sm"
@@ -172,7 +172,7 @@ export function WorkDetailPage() {
               ) : (
                 <DocumentView path={filePath} generation={works.generation} />
               )}
-              <div className="flex min-h-0 flex-col gap-5">
+              <div className="sticky top-20 flex max-h-[calc(100vh-104px)] flex-col gap-5">
                 <WorkFileTree
                   root={`work/${id}`}
                   selected={filePath}

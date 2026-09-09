@@ -60,7 +60,7 @@ export function DocumentView({
     : null;
   return (
     <div
-      className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border bg-card"
+      className="flex flex-col overflow-hidden rounded-lg border bg-card"
       data-testid="document"
     >
       <div className="flex h-10 shrink-0 items-center gap-2.5 border-b bg-background px-4 text-xs text-muted-foreground">
@@ -86,7 +86,7 @@ export function DocumentView({
         </a>
       </div>
       <div
-        className="min-h-0 flex-1 overflow-auto transition-opacity"
+        className="transition-opacity"
         style={{ opacity: state.loading && document ? 0.6 : 1 }}
         aria-busy={state.loading}
       >

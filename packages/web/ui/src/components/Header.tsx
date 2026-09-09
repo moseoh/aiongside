@@ -23,7 +23,7 @@ export function Header({ children }: { children: React.ReactNode }) {
   const works = useWorks();
   const setLang = (lang: Lang) => updateSettings({ lang });
   return (
-    <header className="flex h-14 shrink-0 items-center gap-2 border-b px-6">
+    <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-2 border-b bg-background px-6">
       {children}
       <div className="ml-auto flex items-center gap-2">
         {works.loadedAt ? (

@@ -67,7 +67,7 @@ export function KnowledgePage() {
           {t("navKnowledge")}
         </h1>
       </Header>
-      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_280px] gap-5 px-6 pt-5 pb-6">
+      <div className="grid items-start grid-cols-[minmax(0,1fr)_280px] gap-5 px-6 pt-5 pb-6">
         {knowledge.status === "error" ? (
           <div
             className="rounded-lg border bg-card p-6 text-sm text-destructive"
@@ -114,7 +114,7 @@ export function KnowledgePage() {
             {t("loading")}
           </div>
         )}
-        <div className="flex min-h-0 flex-col gap-5">
+        <div className="sticky top-[76px] flex max-h-[calc(100vh-100px)] flex-col gap-5">
           <div className="flex min-h-0 flex-col gap-2">
             <div className="relative">
               <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />

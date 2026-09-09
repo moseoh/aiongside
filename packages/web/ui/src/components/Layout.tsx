@@ -61,7 +61,7 @@ export function Layout() {
             {t("footer")}
           </p>
         </aside>
-        <main className="flex min-w-0 flex-1 flex-col">
+        <main className="flex min-w-0 flex-1 flex-col overflow-y-auto">
           <Outlet />
         </main>
       </div>
