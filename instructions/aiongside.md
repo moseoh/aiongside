@@ -2,7 +2,15 @@
 
 Use `aiongside` for work creation, status, dependencies, Knowledge document creation and contribution records, Work hash sync, and generated Views. Edit document bodies directly; let the CLI own metadata and generated files.
 
-Use `aiongside --help` or command-specific `--help` when needed. Follow command results, including reasons and recovery hints. Use `aiongside check --json` for document integrity and `aiongside doctor --json` for agent integration.
+Use known commands directly. Do not read help routinely at session start or traverse parent help commands. If syntax or options are unclear, read only the relevant command's --help.
+
+Common commands:
+- Preview status change: aiongside work move <id> <status> --dry-run --json
+- Apply status change: aiongside work move <id> <status> --json
+- Check document integrity: aiongside check --json
+- Check agent integration: aiongside doctor --json
+
+Follow command results, including reasons and recovery hints. Previewing a change does not authorize applying it; follow applicable approval rules.
 
 ## Document and folder roles
 
