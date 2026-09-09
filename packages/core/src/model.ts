@@ -17,14 +17,6 @@ export const WORK_TYPES = [
   "maintenance",
 ] as const;
 
-export const WORK_CHECKS = [
-  "scope",
-  "completion",
-  "verification",
-  "outcome",
-  "knowledge",
-] as const;
-
 const isoDate = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Must use YYYY-MM-DD format")
@@ -41,21 +33,15 @@ const isoDate = z
 
 const isoTimestamp = z.string().datetime({ offset: true });
 const workId = z.string().regex(/^[A-Z][A-Z0-9]{1,7}-[1-9]\d*$/);
+export const knowledgeKeySchema = z
+  .string()
+  .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 const sha256Digest = z.string().regex(/^[a-f0-9]{64}$/);
 
 export const workspaceConfigSchema = z.object({
   schema: z.literal(1),
   name: z.string().trim().min(1),
   idPrefix: z.string().regex(/^[A-Z][A-Z0-9]{1,7}$/),
-  agentSkillVersion: z.number().int().positive().optional(),
-});
-
-export const workChecksSchema = z.object({
-  scope: z.boolean(),
-  completion: z.boolean(),
-  verification: z.boolean(),
-  outcome: z.boolean(),
-  knowledge: z.boolean(),
 });
 
 export const workTransitionSchema = z.object({
@@ -90,7 +76,7 @@ export const workMetadataSchema = z.object({
   created: isoDate,
   updated: isoDate,
   needs: z.array(workId).default([]),
-  checks: workChecksSchema,
+  knowledge: z.array(knowledgeKeySchema).default([]),
   transitions: z.array(workTransitionSchema).default([]),
   completionSeal: completionSealSchema.nullable().default(null),
 });
@@ -107,9 +93,9 @@ export type WorkMetadata = z.infer<typeof workMetadataSchema>;
 export type WorkStatus = WorkMetadata["status"];
 export type MovableStatus = (typeof MOVABLE_STATUSES)[number];
 export type WorkType = WorkMetadata["type"];
-export type WorkCheck = (typeof WORK_CHECKS)[number];
 export type WorkTransition = z.infer<typeof workTransitionSchema>;
 export type CompletionSeal = z.infer<typeof completionSealSchema>;
+export type KnowledgeKey = z.infer<typeof knowledgeKeySchema>;
 
 export interface ValidationIssue {
   code: string;
@@ -120,10 +106,6 @@ export interface ValidationIssue {
 
 export function isMovableStatus(value: string): value is MovableStatus {
   return (MOVABLE_STATUSES as readonly string[]).includes(value);
-}
-
-export function isWorkCheck(value: string): value is WorkCheck {
-  return (WORK_CHECKS as readonly string[]).includes(value);
 }
 
 export function idNumber(id: string): bigint {

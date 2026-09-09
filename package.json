@@ -12,22 +12,26 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "tsc -b && bun run bundle",
-    "bundle": "bun build packages/cli/src/bin.ts --target=node --packages=bundle --outfile packages/cli/dist/bin.js",
-    "typecheck": "tsc -b --pretty false",
+    "build": "bun run build:ui && tsc -b && bun run bundle",
+    "bundle": "bun build packages/cli/src/bin.ts --target=node --packages=bundle --outfile packages/cli/dist/bin.js && bun build packages/cli/src/agent-adapter.ts --target=node --packages=bundle --outfile packages/cli/dist/agent-adapter.js",
+    "typecheck": "bun run build:ui && tsc -b --pretty false && tsc -p packages/web/ui/tsconfig.json --pretty false",
     "test": "bun run build && node ./node_modules/vitest/vitest.mjs run",
     "package:prepare": "bun run build && node scripts/package.mjs prepare",
     "package:pack": "bun run build && node scripts/package.mjs pack",
     "package:smoke": "node scripts/smoke-package.mjs",
+    "test:web-browser": "node scripts/test-web-browser.mjs",
     "package:test": "node --test scripts/*.node-test.mjs",
     "package:check": "bun run build && bun run package:test && node scripts/package.mjs check",
     "lint": "biome check .",
     "check:english": "node scripts/check-english.mjs",
-    "check": "bun run typecheck && bun run test && bun run lint && bun run check:english"
+    "check": "bun run typecheck && bun run test && bun run lint && bun run check:english",
+    "build:ui": "cd packages/web/ui && bunx vite build && cd ../../.. && node scripts/embed-web-assets.mjs",
+    "dev:ui": "cd packages/web/ui && bunx vite"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.0",
     "@types/node": "^22.0.0",
+    "playwright": "1.62.1",
     "typescript": "^6.0.0",
     "vitest": "^4.0.0",
     "yaml": "^2.0.0"

@@ -14,9 +14,11 @@
   },
   "dependencies": {
     "@aiongside/core": "workspace:*",
+    "ignore": "^7.0.5",
     "proper-lockfile": "^4.1.2",
     "write-file-atomic": "^7.0.0",
-    "yaml": "^2.0.0"
+    "yaml": "^2.0.0",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/proper-lockfile": "^4.1.4",

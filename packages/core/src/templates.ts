@@ -8,98 +8,66 @@ export type TemplateName = (typeof TEMPLATE_NAMES)[number];
 export interface TemplateDefinition {
   file: `${TemplateName}.md`;
   contents: string;
-  requiredPlaceholders: readonly string[];
 }
 
 export const TEMPLATE_DEFINITIONS: Record<TemplateName, TemplateDefinition> = {
   record: {
     file: "record.md",
-    requiredPlaceholders: ["title"],
     contents: `# {{title}}
-
-Machine-owned status, transition history, and completion seals are stored in frontmatter. Keep the work narrative below.
 
 ## Context
 
-Describe the confirmed context.
+<!-- Describe the confirmed context. -->
 
 ## Scope
 
-- Included work
+<!-- Describe included work and explicit exclusions. -->
 
 ## Completion criteria
 
-- [ ] A verifiable outcome
+<!-- Describe the requested, verifiable outcome. -->
 
 ## Progress
 
-Record confirmed facts and decisions.
+<!-- Record confirmed facts and decisions. -->
 
 ## Verification
 
-Record the verification method and observed result.
+<!-- Record the verification method and observed result. -->
 
 ## Outcome
 
-Record the result and remaining work.
+<!-- Summarize the result, link to deliverables, and note remaining work. -->
 
-## Knowledge review
-
-Record what persistent knowledge changed, or why no update was needed.
 `,
   },
   overview: {
     file: "overview.md",
-    requiredPlaceholders: ["title"],
     contents: `# {{title}}
 
 ## Purpose
 
-Explain what this work item is and why it matters.
-
-Keep status, progress, decisions, and outcomes in \`record.md\`.
+<!-- Explain what this work item is and why it matters. -->
 `,
   },
   plan: {
     file: "plan.md",
-    requiredPlaceholders: [],
     contents: `# Execution plan
 
 ## Assumptions
 
-- A fact that must remain true for this plan to work
+<!-- Record assumptions relevant to the current plan. -->
 
 ## Current execution
 
-1. Planned change
-2. Verification method
+<!-- Describe the planned actions and how to verify their results. -->
 
 ## Stop conditions
 
-- A condition that requires stopping or reverting the work
+<!-- Note conditions that require stopping or revising the plan. -->
 `,
   },
 };
-
-export function validateTemplate(name: TemplateName, source: string): string[] {
-  const definition = TEMPLATE_DEFINITIONS[name];
-  const issues: string[] = [];
-  const placeholders = [...source.matchAll(/\{\{\s*([^{}]+?)\s*\}\}/g)].map(
-    (match) => match[1] ?? "",
-  );
-
-  for (const required of definition.requiredPlaceholders) {
-    if (!placeholders.includes(required)) {
-      issues.push(`Missing required placeholder: {{${required}}}`);
-    }
-  }
-  for (const placeholder of new Set(placeholders)) {
-    if (placeholder !== "title") {
-      issues.push(`Unsupported placeholder: {{${placeholder}}}`);
-    }
-  }
-  return issues;
-}
 
 export function renderTemplate(
   source: string,
@@ -146,11 +114,4 @@ export function createPlanDocument(
   title?: string,
 ): string {
   return `${renderTemplate(template, { ...(title ? { title } : {}) }).trimEnd()}\n`;
-}
-
-export function createRulesDocument(): string {
-  return `# Workspace rules
-
-Add workspace-specific instructions below. AIongside preserves this file during sync and update.
-`;
 }

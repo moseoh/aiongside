@@ -31,17 +31,11 @@ export const defaultStageDirectory = path.join(artifactsDirectory, "aiongside");
 export const expectedPackageFiles = [
   "LICENSE",
   "README.md",
+  "dist/agent-adapter.js",
   "dist/bin.js",
   "instructions/aiongside.md",
   "package.json",
-  "skills/aiongside/SKILL.md",
 ];
-export const canonicalSkillPath = path.join(
-  repositoryRoot,
-  "skills",
-  "aiongside",
-  "SKILL.md",
-);
 export const canonicalInstructionsPath = path.join(
   repositoryRoot,
   "instructions",
@@ -69,6 +63,10 @@ export function validateSourceManifest(manifest) {
   requireValue(
     manifest.bin?.aiongside === "./dist/bin.js",
     "Package bin must expose ./dist/bin.js as aiongside.",
+  );
+  requireValue(
+    manifest.bin?.["aiongside-agent-adapter"] === "./dist/agent-adapter.js",
+    "Package bin must expose the separate agent adapter.",
   );
   requireValue(
     manifest.engines?.node === ">=22",
@@ -160,22 +158,20 @@ export async function validatePackageDirectory(directory) {
     );
   }
 
+  const adapterPath = path.join(directory, "dist", "agent-adapter.js");
+  requireValue(
+    (await readFile(adapterPath, "utf8")).startsWith("#!/usr/bin/env node\n") &&
+      ((await stat(adapterPath)).mode & 0o111) !== 0,
+    "Adapter must be executable with a Node.js shebang.",
+  );
   const binPath = path.join(directory, "dist", "bin.js");
-  const [
-    binSource,
-    binMetadata,
-    packagedSkill,
-    canonicalSkill,
-    packagedInstructions,
-    canonicalInstructions,
-  ] = await Promise.all([
-    readFile(binPath, "utf8"),
-    stat(binPath),
-    readFile(path.join(directory, "skills", "aiongside", "SKILL.md"), "utf8"),
-    readFile(canonicalSkillPath, "utf8"),
-    readFile(path.join(directory, "instructions", "aiongside.md"), "utf8"),
-    readFile(canonicalInstructionsPath, "utf8"),
-  ]);
+  const [binSource, binMetadata, packagedInstructions, canonicalInstructions] =
+    await Promise.all([
+      readFile(binPath, "utf8"),
+      stat(binPath),
+      readFile(path.join(directory, "instructions", "aiongside.md"), "utf8"),
+      readFile(canonicalInstructionsPath, "utf8"),
+    ]);
   requireValue(
     binSource.startsWith("#!/usr/bin/env node\n"),
     "Package bin must start with the Node.js shebang.",
@@ -183,10 +179,6 @@ export async function validatePackageDirectory(directory) {
   requireValue(
     (binMetadata.mode & 0o111) !== 0,
     "Package bin must be executable.",
-  );
-  requireValue(
-    packagedSkill === canonicalSkill,
-    "Packaged Agent Skill must match the canonical source exactly.",
   );
   requireValue(
     packagedInstructions === canonicalInstructions,
@@ -222,9 +214,6 @@ export async function preparePackage({
 
   await rm(stageDirectory, { recursive: true, force: true });
   await mkdir(path.join(stageDirectory, "dist"), { recursive: true });
-  await mkdir(path.join(stageDirectory, "skills", "aiongside"), {
-    recursive: true,
-  });
   await mkdir(path.join(stageDirectory, "instructions"), { recursive: true });
   await Promise.all([
     copyFile(
@@ -240,8 +229,8 @@ export async function preparePackage({
       path.join(stageDirectory, "LICENSE"),
     ),
     copyFile(
-      canonicalSkillPath,
-      path.join(stageDirectory, "skills", "aiongside", "SKILL.md"),
+      path.join(repositoryRoot, "packages", "cli", "dist", "agent-adapter.js"),
+      path.join(stageDirectory, "dist", "agent-adapter.js"),
     ),
     copyFile(
       canonicalInstructionsPath,
@@ -254,6 +243,7 @@ export async function preparePackage({
     ),
   ]);
   await chmod(path.join(stageDirectory, "dist", "bin.js"), 0o755);
+  await chmod(path.join(stageDirectory, "dist", "agent-adapter.js"), 0o755);
   await validatePackageDirectory(stageDirectory);
 
   return stageDirectory;

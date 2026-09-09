@@ -37,9 +37,12 @@ export async function registryVersionExists(name, version) {
 
 export async function verifyRelease(
   tag,
-  { versionExists = registryVersionExists } = {},
+  {
+    versionExists = registryVersionExists,
+    readManifest = readSourceManifest,
+  } = {},
 ) {
-  const manifest = await readSourceManifest();
+  const manifest = await readManifest();
   validateSourceManifest(manifest);
   validateReleaseTag(tag, manifest.version);
 

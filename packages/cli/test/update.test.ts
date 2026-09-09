@@ -17,7 +17,6 @@ function runtime(
     interactive: true,
     confirm: async () => true,
     runProcess: async () => 0,
-    syncCurrent: async () => undefined,
     report: (event) => events.push(event),
     ...overrides,
   };
@@ -52,7 +51,7 @@ describe("CLI update", () => {
         fetchLatestVersion(vi.fn(async () => response) as typeof fetch),
       ).rejects.toMatchObject({
         code: "AIO-UPDATE-CHECK",
-        message: expect.stringContaining("aiongside skill sync"),
+        message: expect.stringContaining("aiongside update"),
       });
     }
     await expect(
@@ -63,25 +62,19 @@ describe("CLI update", () => {
       ),
     ).rejects.toMatchObject({
       code: "AIO-UPDATE-CHECK",
-      message: expect.stringContaining("aiongside skill sync"),
+      message: expect.stringContaining("aiongside update"),
     });
   });
 
-  test("syncs locally without installation when the CLI is current or newer", async () => {
+  test("does not install or touch a workspace when the CLI is current or newer", async () => {
     for (const latest of ["0.1.0", "0.0.9"]) {
-      const syncCurrent = vi.fn(async () => undefined);
       const runProcess = vi.fn(async () => 0);
       const testRuntime = runtime({
         getLatestVersion: async () => latest,
-        syncCurrent,
         runProcess,
       });
 
-      await performUpdate(
-        { root: "/workspace", currentVersion: "0.1.0" },
-        testRuntime,
-      );
-      expect(syncCurrent).toHaveBeenCalledWith("/workspace");
+      await performUpdate({ currentVersion: "0.1.0" }, testRuntime);
       expect(runProcess).not.toHaveBeenCalled();
       expect(testRuntime.events).toEqual([
         { type: "current", version: "0.1.0" },
@@ -92,13 +85,9 @@ describe("CLI update", () => {
   test("previews and preserves state when an interactive update is declined", async () => {
     const confirm = vi.fn(async () => false);
     const runProcess = vi.fn(async () => 0);
-    const syncCurrent = vi.fn(async () => undefined);
-    const testRuntime = runtime({ confirm, runProcess, syncCurrent });
+    const testRuntime = runtime({ confirm, runProcess });
 
-    await performUpdate(
-      { root: "/workspace", currentVersion: "0.1.0" },
-      testRuntime,
-    );
+    await performUpdate({ currentVersion: "0.1.0" }, testRuntime);
     expect(testRuntime.events).toEqual([
       {
         type: "available",
@@ -109,7 +98,6 @@ describe("CLI update", () => {
       { type: "cancelled" },
     ]);
     expect(runProcess).not.toHaveBeenCalled();
-    expect(syncCurrent).not.toHaveBeenCalled();
   });
 
   test("requires explicit approval in a non-interactive terminal", async () => {
@@ -117,26 +105,19 @@ describe("CLI update", () => {
     const testRuntime = runtime({ interactive: false, runProcess });
 
     await expect(
-      performUpdate(
-        { root: "/workspace", currentVersion: "0.1.0" },
-        testRuntime,
-      ),
+      performUpdate({ currentVersion: "0.1.0" }, testRuntime),
     ).rejects.toMatchObject({ code: "AIO-UPDATE-APPROVAL" });
     expect(runProcess).not.toHaveBeenCalled();
   });
 
-  test("installs the exact approved version and re-resolves the CLI from PATH", async () => {
+  test("installs only the exact approved global version", async () => {
     const confirm = vi.fn(async () => true);
     const runProcess = vi.fn(async () => 0);
     const testRuntime = runtime({ confirm, runProcess });
 
-    await performUpdate(
-      { root: "/workspace", currentVersion: "0.1.0" },
-      testRuntime,
-    );
+    await performUpdate({ currentVersion: "0.1.0" }, testRuntime);
     expect(runProcess.mock.calls).toEqual([
       ["npm", ["install", "--global", "aiongside@0.2.0"]],
-      ["aiongside", ["--root", "/workspace", "skill", "sync"]],
     ]);
     expect(testRuntime.events).toEqual([
       {
@@ -154,40 +135,22 @@ describe("CLI update", () => {
     const confirm = vi.fn(async () => false);
     const runProcess = vi.fn(async () => 0);
     await performUpdate(
-      { root: "/workspace", currentVersion: "0.1.0", yes: true },
+      { currentVersion: "0.1.0", yes: true },
       runtime({ interactive: false, confirm, runProcess }),
     );
     expect(confirm).not.toHaveBeenCalled();
-    expect(runProcess).toHaveBeenCalledTimes(2);
+    expect(runProcess).toHaveBeenCalledTimes(1);
   });
 
-  test("distinguishes install failure from post-install sync failure", async () => {
+  test("reports install failure without a workspace sync stage", async () => {
     await expect(
       performUpdate(
-        { root: "/workspace", currentVersion: "0.1.0", yes: true },
+        { currentVersion: "0.1.0", yes: true },
         runtime({ runProcess: async () => 17 }),
       ),
     ).rejects.toMatchObject({
       code: "AIO-UPDATE-INSTALL",
       message: expect.stringContaining("17"),
-    });
-
-    let call = 0;
-    await expect(
-      performUpdate(
-        { root: "/workspace", currentVersion: "0.1.0", yes: true },
-        runtime({
-          runProcess: async () => {
-            call += 1;
-            return call === 1 ? 0 : 9;
-          },
-        }),
-      ),
-    ).rejects.toMatchObject({
-      code: "AIO-UPDATE-SYNC",
-      message: expect.stringContaining(
-        "aiongside skill sync --root /workspace",
-      ),
     });
   });
 });

@@ -5,7 +5,6 @@ import path from "node:path";
 import { test } from "node:test";
 import {
   canonicalInstructionsPath,
-  canonicalSkillPath,
   createConsumerManifest,
   expectedPackageFiles,
   preparePackage,
@@ -18,12 +17,14 @@ import {
 test("creates public package metadata from the CLI manifest", async () => {
   const source = await readSourceManifest();
   validateSourceManifest(source);
-  assert.equal(source.version, "0.2.1");
 
   const consumer = createConsumerManifest(source);
   assert.equal(consumer.name, "aiongside");
-  assert.equal(consumer.version, "0.2.1");
-  assert.deepEqual(consumer.bin, { aiongside: "./dist/bin.js" });
+  assert.equal(consumer.version, source.version);
+  assert.deepEqual(consumer.bin, {
+    aiongside: "./dist/bin.js",
+    "aiongside-agent-adapter": "./dist/agent-adapter.js",
+  });
   assert.deepEqual(consumer.engines, { node: ">=22" });
   assert.deepEqual(consumer.repository, {
     type: "git",
@@ -52,6 +53,7 @@ test("rejects invalid public package metadata", async () => {
 });
 
 test("prepares only the public package files", async (context) => {
+  const source = await readSourceManifest();
   const temporaryRoot = await mkdtemp(
     path.join(tmpdir(), "aiongside-package-"),
   );
@@ -62,17 +64,10 @@ test("prepares only the public package files", async (context) => {
   const result = await validatePackageDirectory(stageDirectory);
 
   assert.deepEqual(result.files, expectedPackageFiles);
-  assert.equal(result.manifest.version, "0.2.1");
+  assert.equal(result.manifest.version, source.version);
   assert.match(
     await readFile(path.join(stageDirectory, "dist", "bin.js"), "utf8"),
     /^#!\/usr\/bin\/env node/,
-  );
-  assert.equal(
-    await readFile(
-      path.join(stageDirectory, "skills", "aiongside", "SKILL.md"),
-      "utf8",
-    ),
-    await readFile(canonicalSkillPath, "utf8"),
   );
   assert.equal(
     await readFile(
@@ -114,7 +109,7 @@ test("rejects an unexpected tarball inventory", async () => {
       validatePackResult(
         {
           name: "aiongside",
-          version: "0.2.1",
+          version: manifest.version,
           files: [
             ...expectedPackageFiles.map((file) => ({
               path: file,
