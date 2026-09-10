@@ -6,22 +6,16 @@ import { cn } from "@/lib/utils";
 
 function Logo() {
   return (
-    <div className="flex size-6 items-center justify-center rounded-md bg-primary">
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="var(--primary-foreground)"
-        strokeWidth="2.2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        aria-hidden
-      >
-        <path d="M4 20 12 4l8 16" />
-        <path d="M8 14h8" />
-      </svg>
-    </div>
+    <svg
+      width="24"
+      height="24"
+      viewBox="0 0 64 64"
+      fill="none"
+      aria-hidden
+    >
+      <rect x="17" y="15" width="12" height="34" rx="6" fill="var(--foreground)" />
+      <rect x="35" y="15" width="12" height="34" rx="6" fill="#fbbf24" />
+    </svg>
   );
 }
 
