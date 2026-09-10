@@ -6,7 +6,8 @@
       "!**/node_modules",
       "!**/dist",
       "!**/coverage",
-      "!**/assets.generated.ts"
+      "!**/assets.generated.ts",
+      "!packages/web/ui/public/*.svg"
     ]
   },
   "formatter": {

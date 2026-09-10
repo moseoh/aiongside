@@ -14,8 +14,10 @@ const files = stdout
   .filter((file) => file.length > 0);
 const violations = [];
 
-// Locale resources (*.ko.*) and the embedded web bundle carry translated UI text.
-const exempt = /(?:\.ko\.[a-z]+|assets\.generated\.ts)$/;
+// Locale resources (*.ko.*) and the embedded web bundle carry translated UI
+// text; binary assets only look like text by accident.
+const exempt =
+  /(?:\.ko\.[a-z]+|assets\.generated\.ts|\.(?:png|ico|woff2?|ttf))$/;
 
 for (const file of files) {
   if (exempt.test(file)) continue;
