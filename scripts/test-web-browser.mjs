@@ -461,6 +461,35 @@ try {
     ),
     false,
   );
+  // 13. Server restart: the stream reconnects, resyncs, and new changes still arrive.
+  const port = new URL(url).port;
+  await cli(["stop"]);
+  await page.waitForFunction(
+    () =>
+      document
+        .querySelector('[data-testid="live"]')
+        ?.getAttribute("data-live-status") === "offline",
+  );
+  await cli([
+    "--background",
+    "--host",
+    process.env.AIONGSIDE_WEB_TEST_HOST ?? "localhost",
+    "--port",
+    port,
+  ]);
+  await page.waitForFunction(
+    () =>
+      document
+        .querySelector('[data-testid="live"]')
+        ?.getAttribute("data-live-status") === "live",
+  );
+  await put(
+    "work/WORK-89/record.md",
+    "---\nschema: 1\nid: WORK-89\ntitle: After restart\nstatus: inbox\ntype: delivery\ncreated: 2026-09-10\nupdated: 2026-09-10\n---\n\nNotes.\n",
+  );
+  await page.waitForFunction(
+    () => document.querySelectorAll('[data-testid="work-row"]').length === 89,
+  );
   if (process.env.AIONGSIDE_WEB_SCREENSHOT)
     await page.screenshot({
       path: process.env.AIONGSIDE_WEB_SCREENSHOT,
@@ -468,7 +497,7 @@ try {
     });
   assert.deepEqual(errors, []);
   console.log(
-    "Web browser passed: list/search/tabs/sort, board, detail relations, tree + ignored toggle, Markdown policy, Knowledge, language/theme persistence, direct URLs, live updates (reload, tree marks, toasts, pause), unchanged workspace.",
+    "Web browser passed: list/search/tabs/sort, board, detail relations, tree + ignored toggle, Markdown policy, Knowledge, language/theme persistence, direct URLs, live updates (reload, tree marks, toasts, pause, restart resync), unchanged workspace.",
   );
 } finally {
   await browser?.close();
