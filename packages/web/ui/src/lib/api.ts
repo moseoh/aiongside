@@ -94,6 +94,21 @@ export interface KnowledgeResponse {
   issues: { path: string; message: string }[];
 }
 
+export type ChangeKind = "created" | "updated" | "deleted";
+
+/** One file change reported by GET /api/events. */
+export interface ChangeEvent {
+  id: number;
+  at: string;
+  scope: "work" | "knowledge";
+  work?: string;
+  title?: string;
+  path: string;
+  kind: ChangeKind;
+  status?: { from: string; to: string };
+  error?: string;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,

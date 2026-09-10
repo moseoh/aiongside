@@ -86,7 +86,6 @@ export function KnowledgePage() {
         ) : documentPath ? (
           <DocumentView
             path={documentPath}
-            generation={works.generation}
             meta={
               key ? (
                 <span

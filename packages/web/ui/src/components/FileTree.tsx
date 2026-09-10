@@ -16,6 +16,7 @@ import {
 } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { routeForPath } from "@/lib/links";
+import { useLive } from "@/lib/live";
 import { cn } from "@/lib/utils";
 
 /** Folder paths above a selected file, so a direct URL shows it in the tree. */
@@ -51,6 +52,7 @@ function TreeRow({
 }) {
   const { t } = useT();
   const navigate = useNavigate();
+  const changed = useLive().changed.has(row.path) && row.kind === "file";
   const directory = row.kind === "directory";
   const label = (
     <>
@@ -64,6 +66,13 @@ function TreeRow({
         <span className="shrink-0 rounded-sm border px-1 text-[10px] text-muted-foreground">
           {t("ignoredTag")}
         </span>
+      ) : null}
+      {changed ? (
+        <span
+          className="size-1.5 shrink-0 rounded-full bg-s-active"
+          title={t("changedSinceOpened")}
+          data-testid="changed-mark"
+        />
       ) : null}
     </>
   );

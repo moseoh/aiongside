@@ -1,8 +1,24 @@
-import { DownloadIcon } from "lucide-react";
+import { DownloadIcon, RefreshCwIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Markdown } from "@/components/Markdown";
 import { api, type Document, errorMessage } from "@/lib/api";
-import { useT } from "@/lib/i18n";
+import { formatElapsed, useT } from "@/lib/i18n";
+import { markOpened, useLive } from "@/lib/live";
+
+/** "changed · 12s ago" that keeps counting while the pill is visible. */
+function ChangedSince({ at }: { at: string }) {
+  const { lang, t } = useT();
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 10_000);
+    return () => clearInterval(timer);
+  }, []);
+  return (
+    <>
+      {t("changed")} · {formatElapsed(lang, Date.parse(at), now)}
+    </>
+  );
+}
 
 interface State {
   loading: boolean;
@@ -10,32 +26,40 @@ interface State {
   error: string | null;
 }
 
-/** Fetches one workspace file when its path or the refresh generation changes. */
+/**
+ * Fetches one workspace file when its path changes. Live changes to the open
+ * file only show a Reload prompt; the body stays until the reader asks.
+ */
 export function DocumentView({
   path,
-  generation,
   meta,
 }: {
   path: string;
-  generation: number;
   meta?: React.ReactNode;
 }) {
   const { t, size } = useT();
+  const live = useLive();
+  const [reloads, setReloads] = useState(0);
   const [state, setState] = useState<State>({
     loading: true,
     document: null,
     error: null,
   });
+  const changedEvent = live.changed.has(path)
+    ? live.recent.find((event) => event.path === path)
+    : undefined;
   // Keep the previous document on screen while the next one loads, so
   // switching files replaces content instead of flashing a loading state.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: generation forces a re-read after Refresh
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reloads forces a re-read on Reload
   useEffect(() => {
     let cancelled = false;
     setState((prev) => ({ ...prev, loading: true }));
     api
       .document(path)
       .then((document) => {
-        if (!cancelled) setState({ loading: false, document, error: null });
+        if (cancelled) return;
+        markOpened(path);
+        setState({ loading: false, document, error: null });
       })
       .catch((error) => {
         if (!cancelled)
@@ -48,7 +72,7 @@ export function DocumentView({
     return () => {
       cancelled = true;
     };
-  }, [path, generation]);
+  }, [path, reloads]);
 
   const document = state.document;
   const kindLabel = document
@@ -76,9 +100,32 @@ export function DocumentView({
           </span>
         ) : null}
         {meta}
+        <span className="flex-1" />
+        {changedEvent || state.error ? (
+          <span
+            className="inline-flex shrink-0 items-center gap-2 text-s-active"
+            data-testid="document-changed"
+          >
+            {changedEvent ? (
+              <>
+                <span className="size-1.5 rounded-full bg-s-active" />
+                <ChangedSince at={changedEvent.at} />
+              </>
+            ) : null}
+            <button
+              type="button"
+              className="inline-flex cursor-pointer items-center gap-1 font-medium text-foreground underline decoration-ring underline-offset-3 hover:text-muted-foreground"
+              onClick={() => setReloads((n) => n + 1)}
+              data-testid="document-reload"
+            >
+              <RefreshCwIcon className="size-3" />
+              <span>{t("reload")}</span>
+            </button>
+          </span>
+        ) : null}
         <a
           href={api.downloadUrl(path)}
-          className="ml-auto inline-flex shrink-0 items-center gap-1.5 hover:text-foreground"
+          className="ml-3 inline-flex shrink-0 items-center gap-1.5 hover:text-foreground"
           download
         >
           <DownloadIcon className="size-3.5" />

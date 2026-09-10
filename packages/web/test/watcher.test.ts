@@ -233,3 +233,26 @@ test("reports unsupported recursive watching instead of silently emitting nothin
   const supported = await watch(root);
   expect(supported.supported).toBe(true);
 });
+
+test("scans a new folder so files written before its watch attached are reported", async () => {
+  const root = await fixture();
+  let notify: ((event: string, name: string) => void) | undefined;
+  const watcher = await WorkspaceWatcher.start(root, {
+    debounceMs: 50,
+    watch: (target, _options, listener) => {
+      if (String(target).endsWith("work"))
+        notify = listener as (event: string, name: string) => void;
+      return { close() {}, on() {} } as never;
+    },
+  });
+  watchers.push(watcher);
+  const batch = nextBatch(watcher);
+  await put(root, "work/WORK-2/record.md", record("WORK-2", "inbox"));
+  await put(root, "work/WORK-2/references/brief.md", "# Brief\n");
+  notify?.("rename", "WORK-2");
+  const events = await batch;
+  expect(events.map((event) => [event.path, event.kind])).toEqual([
+    ["work/WORK-2/record.md", "created"],
+    ["work/WORK-2/references/brief.md", "updated"],
+  ]);
+});

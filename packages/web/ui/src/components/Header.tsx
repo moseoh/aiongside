@@ -1,55 +1,37 @@
 import { MoonIcon, RefreshCwIcon, SunIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { LiveMenu } from "@/components/LiveMenu";
 import { Button } from "@/components/ui/button";
-import { formatElapsed, useT } from "@/lib/i18n";
+import { useT } from "@/lib/i18n";
+import { useLive } from "@/lib/live";
 import { type Lang, updateSettings, useSettings } from "@/lib/settings";
 import { cn } from "@/lib/utils";
 import { refreshWorks, useWorks } from "@/lib/works";
 
-function Elapsed({ from }: { from: number }) {
-  const { lang } = useT();
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 30_000);
-    return () => clearInterval(timer);
-  }, []);
-  return <>{formatElapsed(lang, from, now)}</>;
-}
-
-/** Page header: title area on the left, shared Refresh · theme · language on the right. */
+/** Page header: title area on the left, shared Live · theme · language on the right. */
 export function Header({ children }: { children: React.ReactNode }) {
   const { t } = useT();
   const settings = useSettings();
   const works = useWorks();
+  const live = useLive();
   const setLang = (lang: Lang) => updateSettings({ lang });
   return (
     <header className="sticky top-0 z-10 flex h-14 shrink-0 items-center gap-2 border-b bg-background px-6">
       {children}
       <div className="ml-auto flex items-center gap-2">
-        {works.loadedAt ? (
-          <span
-            className="mr-1 text-xs text-muted-foreground"
-            data-testid="refreshed-at"
+        {live.status === "unsupported" ? (
+          // Without folder watching the manual Refresh stays the only way to catch up.
+          <Button
+            size="sm"
+            onClick={() => void refreshWorks()}
+            disabled={works.status === "loading"}
+            aria-label={t("refresh")}
           >
-            {works.status === "loading" ? (
-              t("refreshing")
-            ) : (
-              <>
-                {t("refreshedAgo", { time: "" }).trim()}{" "}
-                <Elapsed from={works.loadedAt} />
-              </>
-            )}
-          </span>
-        ) : null}
-        <Button
-          size="sm"
-          onClick={() => void refreshWorks()}
-          disabled={works.status === "loading"}
-          aria-label={t("refresh")}
-        >
-          <RefreshCwIcon className="size-3.5" />
-          <span>{t("refresh")}</span>
-        </Button>
+            <RefreshCwIcon className="size-3.5" />
+            <span>{t("refresh")}</span>
+          </Button>
+        ) : (
+          <LiveMenu />
+        )}
         <Button
           size="icon"
           title={t("toggleTheme")}

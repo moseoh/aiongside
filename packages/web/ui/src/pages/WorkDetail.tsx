@@ -357,7 +357,7 @@ export function WorkDetailPage() {
                     </Button>
                   </div>
                 ) : (
-                  <DocumentView path={filePath} generation={works.generation} />
+                  <DocumentView path={filePath} />
                 )}
                 <div className="sticky top-20 flex max-h-[calc(100vh-104px)] flex-col gap-5">
                   <WorkFileTree

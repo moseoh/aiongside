@@ -1,19 +1,29 @@
 import { BookOpenIcon, ListIcon } from "lucide-react";
+import { useEffect } from "react";
 import { NavLink, Outlet } from "react-router";
+import { Toasts } from "@/components/Toasts";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useT } from "@/lib/i18n";
+import { useLive, useLiveConnection, useLiveSubscription } from "@/lib/live";
 import { cn } from "@/lib/utils";
+import { refreshWorks } from "@/lib/works";
+
+/** Every applied change batch re-reads the Work list; the list feeds Knowledge and detail views. */
+function applyChanges() {
+  void refreshWorks();
+}
 
 function Logo() {
   return (
-    <svg
-      width="24"
-      height="24"
-      viewBox="0 0 64 64"
-      fill="none"
-      aria-hidden
-    >
-      <rect x="17" y="15" width="12" height="34" rx="6" fill="var(--foreground)" />
+    <svg width="24" height="24" viewBox="0 0 64 64" fill="none" aria-hidden>
+      <rect
+        x="17"
+        y="15"
+        width="12"
+        height="34"
+        rx="6"
+        fill="var(--foreground)"
+      />
       <rect x="35" y="15" width="12" height="34" rx="6" fill="#fbbf24" />
     </svg>
   );
@@ -21,6 +31,12 @@ function Logo() {
 
 export function Layout() {
   const { t } = useT();
+  useLiveConnection();
+  useLiveSubscription(applyChanges);
+  const { resyncs } = useLive();
+  useEffect(() => {
+    if (resyncs > 0) void refreshWorks();
+  }, [resyncs]);
   const item = ({ isActive }: { isActive: boolean }) =>
     cn(
       "flex items-center gap-2.5 rounded-md px-2 py-[7px] text-[13px] hover:bg-accent",
@@ -58,6 +74,7 @@ export function Layout() {
         <main className="flex min-w-0 flex-1 flex-col overflow-y-auto [scrollbar-gutter:stable]">
           <Outlet />
         </main>
+        <Toasts />
       </div>
     </TooltipProvider>
   );

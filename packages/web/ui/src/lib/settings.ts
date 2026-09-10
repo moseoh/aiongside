@@ -17,6 +17,8 @@ export interface Settings {
   /** Expanded folder paths per Work, newest Work last; capped at EXPANDED_LIMIT. */
   expanded: Record<string, string[]>;
   knowledgeExpanded: string[];
+  /** False while the user paused live updates. */
+  live: boolean;
 }
 
 const KEY = "aiongside.web.v1";
@@ -46,6 +48,7 @@ export function defaults(): Settings {
     showIgnored: false,
     expanded: {},
     knowledgeExpanded: [],
+    live: true,
   };
 }
 
@@ -94,6 +97,7 @@ function sanitize(raw: unknown): Settings {
     showIgnored: value.showIgnored === true,
     expanded,
     knowledgeExpanded: stringList(value.knowledgeExpanded),
+    live: value.live !== false,
   };
 }
 

@@ -1,5 +1,5 @@
-import { type FSWatcher, watch } from "node:fs";
-import { stat } from "node:fs/promises";
+import { type Dirent, type FSWatcher, watch } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { WorkReader } from "@aiongside/filesystem";
 
@@ -22,6 +22,8 @@ export interface ChangeEvent {
 export type ChangeListener = (events: ChangeEvent[]) => void;
 
 const WATCHED = ["work", "knowledge"] as const;
+/** How deep a newly seen folder is scanned for files its watch may have missed. */
+const SCAN_DEPTH = 4;
 
 /**
  * Watches the managed Work and Knowledge folders and turns raw file system
@@ -122,11 +124,49 @@ export class WorkspaceWatcher {
     }, this.debounceMs);
   }
 
+  /**
+   * Files inside a folder that just appeared: the recursive watch attaches
+   * after the folder exists, so anything written in between has no event.
+   */
+  private async scan(relative: string, depth: number): Promise<string[]> {
+    if (depth > SCAN_DEPTH) return [];
+    const absolute = path.join(this.reader.root, relative);
+    let entries: Dirent[];
+    try {
+      entries = await readdir(absolute, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    const found: string[] = [];
+    for (const entry of entries) {
+      const child = `${relative}/${entry.name}`;
+      if (entry.isDirectory())
+        found.push(...(await this.scan(child, depth + 1)));
+      else if (entry.isFile()) found.push(child);
+    }
+    return found;
+  }
+
   private async flush() {
-    const paths = [...this.pending].sort();
+    const queued = [...this.pending];
     this.pending.clear();
+    const paths = new Set(queued);
+    for (const relative of queued) {
+      // Only the top-level folders' direct children can be brand-new folders
+      // without their own events; deeper folders come with file events.
+      let isDirectory = false;
+      try {
+        isDirectory = (
+          await stat(path.join(this.reader.root, relative))
+        ).isDirectory();
+      } catch {
+        continue;
+      }
+      if (isDirectory)
+        for (const file of await this.scan(relative, 1)) paths.add(file);
+    }
     const events: ChangeEvent[] = [];
-    for (const relative of paths) {
+    for (const relative of [...paths].sort()) {
       const event = await this.describe(relative);
       if (event) events.push(event);
     }

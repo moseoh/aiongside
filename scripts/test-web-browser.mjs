@@ -353,23 +353,95 @@ try {
     .getByRole("link", { name: "Work", exact: true })
     .waitFor();
 
-  // 8. Missing Overview, refresh after external change, direct URLs.
+  // 8. Missing Overview, direct URLs.
   await page.goto(`${url}/work/WORK-7`);
   await page.getByTestId("no-overview").waitFor();
   await page.getByRole("link", { name: "Open Record" }).click();
   await heading("Record");
   assert.equal(await snapshot(), before);
-  await page.goto(`${url}/work/WORK-2`);
-  await heading("Confirm venue capacity");
-  await put("work/WORK-2/overview.md", "# Updated elsewhere\n");
-  await page.getByRole("button", { name: "Refresh" }).click();
-  await heading("Updated elsewhere");
   await page.goto(`${url}/work/WORK-1/file/deliverables/invitation.md`);
   await heading("Invitation");
   await page.goto(`${url}/work/WORK-99`);
   await page.getByTestId("detail-error").waitFor();
 
-  // 9. Larger lists stay usable.
+  // 9. Live: open document keeps its body until Reload; tree marks changes.
+  await page.goto(`${url}/work/WORK-2`);
+  await heading("Confirm venue capacity");
+  await page.getByTestId("live").waitFor();
+  await put("work/WORK-2/overview.md", "# Updated elsewhere\n");
+  await page.getByTestId("document-changed").waitFor();
+  await heading("Confirm venue capacity");
+  await page.getByTestId("document-reload").click();
+  await heading("Updated elsewhere");
+  assert.equal(await page.getByTestId("document-changed").count(), 0);
+  await put("work/WORK-2/plan.md", "# Plan\n\nDrafted elsewhere.\n");
+  const planRow = page
+    .getByTestId("file-tree")
+    .locator('[data-tree-path="work/WORK-2/plan.md"]');
+  await planRow.waitFor();
+  await planRow.locator('[data-testid="changed-mark"]').waitFor();
+  await planRow.click();
+  await heading("Plan");
+  assert.equal(
+    await planRow.locator('[data-testid="changed-mark"]').count(),
+    0,
+  );
+
+  // 10. Live: other Work transitions toast; the current Work updates in place.
+  await put(
+    "work/WORK-3/record.md",
+    record("WORK-3", "Participant invitation", "active"),
+  );
+  const toast = page.getByTestId("toast");
+  await toast.waitFor();
+  assert.ok((await toast.innerText()).includes("WORK-3"));
+  assert.ok((await toast.innerText()).includes("Active"));
+  await toast.click();
+  await page.waitForURL(/\/work\/WORK-3$/);
+  await heading("Participant invitation");
+  await put(
+    "work/WORK-3/record.md",
+    record("WORK-3", "Participant invitation", "waiting"),
+  );
+  await page.waitForFunction(() =>
+    document
+      .querySelector('[data-testid="detail-heading"]')
+      ?.textContent?.includes("Waiting"),
+  );
+  await page.waitForTimeout(700);
+  assert.equal(await page.getByTestId("toast").count(), 0);
+
+  // 11. Live: list updates in place; Pause queues, Resume applies.
+  await page.goto(`${url}/work`);
+  await page.waitForFunction(
+    () => document.querySelectorAll('[data-testid="work-row"]').length === 7,
+  );
+  await put("work/WORK-9/record.md", record("WORK-9", "Arrived live", "inbox"));
+  await page.waitForFunction(
+    () => document.querySelectorAll('[data-testid="work-row"]').length === 8,
+  );
+  await page.getByTestId("live").click();
+  const recent = page.getByTestId("recent-changes");
+  await recent.waitFor();
+  assert.ok((await recent.innerText()).includes("WORK-9"));
+  await page.getByTestId("live-pause").click();
+  await page.keyboard.press("Escape");
+  // A previously broken Record becomes valid while paused.
+  await put(
+    "work/WORK-8/record.md",
+    record("WORK-8", "Queued while paused", "inbox"),
+  );
+  await page.waitForTimeout(800);
+  assert.equal(await rows.count(), 8);
+  assert.ok((await page.getByTestId("live").innerText()).includes("Paused"));
+  await page.getByTestId("live").click();
+  await page.getByTestId("live-pause").click();
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(
+    () => document.querySelectorAll('[data-testid="work-row"]').length === 9,
+  );
+
+  // 12. Larger lists stay usable.
   for (let index = 9; index <= 88; index++) {
     await put(
       `work/WORK-${index}/record.md`,
@@ -378,7 +450,7 @@ try {
   }
   await page.goto(`${url}/work`);
   await page.waitForFunction(
-    () => document.querySelectorAll('[data-testid="work-row"]').length === 87,
+    () => document.querySelectorAll('[data-testid="work-row"]').length === 88,
   );
   await page
     .locator('[data-testid="work-row"][data-work-id="WORK-88"]')
@@ -396,7 +468,7 @@ try {
     });
   assert.deepEqual(errors, []);
   console.log(
-    "Web browser passed: list/search/tabs/sort, board, detail relations, tree + ignored toggle, Markdown policy, Knowledge, language/theme persistence, refresh, direct URLs, unchanged workspace.",
+    "Web browser passed: list/search/tabs/sort, board, detail relations, tree + ignored toggle, Markdown policy, Knowledge, language/theme persistence, direct URLs, live updates (reload, tree marks, toasts, pause), unchanged workspace.",
   );
 } finally {
   await browser?.close();

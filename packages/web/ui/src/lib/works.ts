@@ -19,6 +19,8 @@ let state: WorksState = {
 };
 const listeners = new Set<() => void>();
 let inflight: Promise<void> | null = null;
+/** A refresh asked for while one is running re-runs once it finishes. */
+let again = false;
 
 function set(patch: Partial<WorksState>) {
   state = { ...state, ...patch };
@@ -26,7 +28,10 @@ function set(patch: Partial<WorksState>) {
 }
 
 export function refreshWorks(): Promise<void> {
-  if (inflight) return inflight;
+  if (inflight) {
+    again = true;
+    return inflight;
+  }
   set({ status: "loading", error: null });
   inflight = api
     .works()
@@ -47,6 +52,10 @@ export function refreshWorks(): Promise<void> {
     )
     .finally(() => {
       inflight = null;
+      if (again) {
+        again = false;
+        void refreshWorks();
+      }
     });
   return inflight;
 }
