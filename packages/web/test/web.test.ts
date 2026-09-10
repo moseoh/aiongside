@@ -491,3 +491,152 @@ test("validates hosts without accepting wildcard interfaces or URL components", 
   ])
     expect(() => parseWebUrl(url)).toThrow();
 });
+
+/** Minimal SSE client: yields parsed events from /api/events. */
+async function sse(url: string, headers: Record<string, string> = {}) {
+  const controller = new AbortController();
+  const response = await fetch(`${url}/api/events`, {
+    headers: { Accept: "text/event-stream", ...headers },
+    signal: controller.signal,
+  });
+  const reader = response.body?.getReader();
+  const decoder = new TextDecoder();
+  let buffered = "";
+  const queue: { event: string; id?: string; data: unknown }[] = [];
+  let done = false;
+  async function pump() {
+    while (reader) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffered += decoder.decode(chunk.value, { stream: true });
+      let index = buffered.indexOf("\n\n");
+      while (index >= 0) {
+        const block = buffered.slice(0, index);
+        buffered = buffered.slice(index + 2);
+        const fields: Record<string, string> = {};
+        for (const line of block.split("\n")) {
+          if (line.startsWith(":")) continue;
+          const colon = line.indexOf(":");
+          fields[line.slice(0, colon)] = line.slice(colon + 1).trimStart();
+        }
+        if (fields.data !== undefined)
+          queue.push({
+            event: fields.event ?? "message",
+            ...(fields.id !== undefined ? { id: fields.id } : {}),
+            data: JSON.parse(fields.data),
+          });
+        index = buffered.indexOf("\n\n");
+      }
+    }
+    done = true;
+  }
+  const pumping = pump().catch(() => {
+    done = true;
+  });
+  async function next(timeout = 3000) {
+    const started = Date.now();
+    while (!queue.length) {
+      if (done) throw new Error("Stream ended.");
+      if (Date.now() - started > timeout) throw new Error("Timed out.");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    return queue.shift() as { event: string; id?: string; data: unknown };
+  }
+  return {
+    response,
+    next,
+    ended: () => pumping.then(() => done),
+    close: () => controller.abort(),
+  };
+}
+
+test("streams a live state event then change events over /api/events", async () => {
+  const root = await fixture();
+  const server = await startWebServer(root, { watchDebounceMs: 50 });
+  servers.push(server);
+  const stream = await sse(server.url);
+  expect(stream.response.headers.get("content-type")).toContain(
+    "text/event-stream",
+  );
+  expect(stream.response.headers.get("cache-control")).toBe("no-store");
+  expect(await stream.next()).toMatchObject({
+    event: "state",
+    data: { state: "live" },
+  });
+  await put(
+    root,
+    "work/WORK-2/record.md",
+    formatMarkdownDocument(
+      {
+        schema: 1,
+        id: "WORK-2",
+        title: "Work 2",
+        status: "active",
+        type: "delivery",
+        created: "2026-09-08",
+        updated: "2026-09-10",
+        needs: [],
+      },
+      "Moved on.",
+    ),
+  );
+  const change = await stream.next();
+  expect(change.event).toBe("change");
+  expect(change.id).toBe("1");
+  expect(change.data).toMatchObject({
+    work: "WORK-2",
+    path: "work/WORK-2/record.md",
+    status: { from: "waiting", to: "active" },
+  });
+  stream.close();
+});
+
+test("replays after Last-Event-ID and asks for a resync when the id is unknown", async () => {
+  const root = await fixture();
+  const server = await startWebServer(root, { watchDebounceMs: 50 });
+  servers.push(server);
+  const first = await sse(server.url);
+  await first.next();
+  await put(root, "work/WORK-1/a.md", "a");
+  await first.next();
+  await put(root, "work/WORK-1/b.md", "b");
+  await first.next();
+  first.close();
+  const replay = await sse(server.url, { "Last-Event-ID": "1" });
+  expect(await replay.next()).toMatchObject({
+    event: "state",
+    data: { state: "live", resync: false },
+  });
+  expect(await replay.next()).toMatchObject({
+    id: "2",
+    data: { path: "work/WORK-1/b.md" },
+  });
+  replay.close();
+  const stale = await sse(server.url, { "Last-Event-ID": "99" });
+  expect(await stale.next()).toMatchObject({
+    data: { state: "live", resync: true },
+  });
+  stale.close();
+});
+
+test("rejects event streams from other origins and non-GET methods", async () => {
+  const root = await fixture();
+  const url = await serve(root);
+  const foreign = await fetch(`${url}/api/events`, {
+    headers: { Origin: "http://evil.example" },
+  });
+  expect(foreign.status).toBe(403);
+  const post = await fetch(`${url}/api/events`, { method: "POST" });
+  expect(post.status).toBe(405);
+});
+
+test("ends open event streams when the server closes", async () => {
+  const root = await fixture();
+  const server = await startWebServer(root, { watchDebounceMs: 50 });
+  const stream = await sse(server.url);
+  await stream.next();
+  const started = Date.now();
+  await server.close();
+  expect(await stream.ended()).toBe(true);
+  expect(Date.now() - started).toBeLessThan(900);
+});

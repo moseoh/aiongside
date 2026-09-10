@@ -4,6 +4,9 @@ import { pipeline } from "node:stream/promises";
 import { WorkReader } from "@aiongside/filesystem";
 import { webAssets } from "./assets.generated.js";
 import { isLoopback, resolveWebHost, webUrl } from "./host.js";
+import { type ChangeEvent, WorkspaceWatcher } from "./watcher.js";
+
+const PING_INTERVAL_MS = 25_000;
 
 export async function startWebServer(
   root: string,
@@ -12,15 +15,24 @@ export async function startWebServer(
     port?: number;
     token?: string;
     onStop?: () => Promise<void>;
+    /** Debounce for file change events; tests shorten it. */
+    watchDebounceMs?: number;
   } = {},
 ) {
   const canonical = (await WorkReader.create(root)).root;
   const binding = await resolveWebHost(options.host);
+  const watcher = await WorkspaceWatcher.start(canonical, {
+    ...(options.watchDebounceMs !== undefined
+      ? { debounceMs: options.watchDebounceMs }
+      : {}),
+  });
+  const streams = new Set<() => void>();
   const allowedOrigins = new Set<string>();
   let url = "";
   let closing: Promise<void> | undefined;
   const close = () => {
     closing ??= new Promise<void>((resolve, reject) => {
+      for (const end of [...streams]) end();
       const timer = setTimeout(() => server.closeAllConnections(), 1000);
       timer.unref();
       server.close((error) => {
@@ -29,7 +41,7 @@ export async function startWebServer(
         else resolve();
       });
       server.closeIdleConnections();
-    });
+    }).then(() => watcher.close());
     return closing;
   };
   const server = createServer(async (request, response) => {
@@ -107,6 +119,46 @@ export async function startWebServer(
           "Content-Length": body.length,
         });
         response.end(request.method === "HEAD" ? undefined : body);
+        return;
+      }
+      if (target.pathname === "/api/events") {
+        if (request.method !== "GET") {
+          json(405, { error: "Event streams are GET only." });
+          return;
+        }
+        const lastId = Number.parseInt(
+          String(request.headers["last-event-id"] ?? ""),
+          10,
+        );
+        const replay = Number.isFinite(lastId) ? watcher.since(lastId) : [];
+        response.writeHead(200, {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          Connection: "keep-alive",
+        });
+        const send = (event: string, data: unknown, id?: number) => {
+          response.write(
+            `${id === undefined ? "" : `id: ${id}\n`}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`,
+          );
+        };
+        send("state", { state: "live", resync: replay === undefined });
+        const deliver = (events: ChangeEvent[]) => {
+          for (const event of events) send("change", event, event.id);
+        };
+        deliver(replay ?? []);
+        const unsubscribe = watcher.subscribe(deliver);
+        const ping = setInterval(
+          () => response.write(": ping\n\n"),
+          PING_INTERVAL_MS,
+        );
+        ping.unref();
+        const end = () => {
+          streams.delete(end);
+          unsubscribe();
+          clearInterval(ping);
+          response.end();
+        };
+        streams.add(end);
+        request.once("close", end);
         return;
       }
       const reader = new WorkReader(canonical);
