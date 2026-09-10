@@ -55,7 +55,7 @@ export function Layout() {
             {t("footer")}
           </p>
         </aside>
-        <main className="flex min-w-0 flex-1 flex-col overflow-y-auto">
+        <main className="flex min-w-0 flex-1 flex-col overflow-y-auto [scrollbar-gutter:stable]">
           <Outlet />
         </main>
       </div>
