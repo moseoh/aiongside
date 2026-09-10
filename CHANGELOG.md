@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+## 0.6.0 - 2026-09-10
+
+### Added
+
+- Live updates in the Web View: the server watches `work/` and `knowledge/` and pushes changes, so lists, board, metadata, relations, and file trees refresh in place.
+- Live button in the header with a recent changes list, pause and resume, and connection state.
+- Open documents keep their body when the file changes on disk and show a Reload link; file trees mark files changed since you last opened them.
+- Toast notifications in the bottom-left corner for status transitions and new Work outside the current page.
+- Status history tab on the Work detail page.
+- Copy Work ID button in the detail header.
+- Brand mark and favicon set.
+
+### Changed
+
+- The header Refresh button is replaced by the Live button. It returns only where folder watching is unavailable.
+
+### Fixed
+
+- Document width no longer shifts when a page scrollbar appears or disappears.
+
+### Existing workspaces
+
+No data or hook changes. Restart running Web View servers to get live updates.
+
 ## 0.5.1 - 2026-09-09
 
 ### Changed
