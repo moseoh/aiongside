@@ -17,6 +17,8 @@ export async function startWebServer(
     onStop?: () => Promise<void>;
     /** Debounce for file change events; tests shorten it. */
     watchDebounceMs?: number;
+    /** Injection point for tests; defaults to node:fs watch. */
+    watch?: NonNullable<Parameters<typeof WorkspaceWatcher.start>[1]>["watch"];
   } = {},
 ) {
   const canonical = (await WorkReader.create(root)).root;
@@ -25,6 +27,7 @@ export async function startWebServer(
     ...(options.watchDebounceMs !== undefined
       ? { debounceMs: options.watchDebounceMs }
       : {}),
+    ...(options.watch ? { watch: options.watch } : {}),
   });
   const streams = new Set<() => void>();
   const allowedOrigins = new Set<string>();
@@ -140,6 +143,11 @@ export async function startWebServer(
             `${id === undefined ? "" : `id: ${id}\n`}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`,
           );
         };
+        if (!watcher.supported) {
+          send("state", { state: "unsupported" });
+          response.end();
+          return;
+        }
         send("state", { state: "live", resync: replay === undefined });
         const deliver = (events: ChangeEvent[]) => {
           for (const event of events) send("change", event, event.id);

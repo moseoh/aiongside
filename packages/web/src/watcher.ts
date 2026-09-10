@@ -34,6 +34,8 @@ export class WorkspaceWatcher {
   private flushing: Promise<void> = Promise.resolve();
   private nextId = 1;
   private readonly watchers: FSWatcher[] = [];
+  /** False when the platform cannot watch folders recursively. */
+  supported = true;
   private readonly buffer: ChangeEvent[] = [];
   /** Last known Record metadata per Work ID, for status transitions. */
   private readonly records = new Map<
@@ -49,8 +51,14 @@ export class WorkspaceWatcher {
 
   static async start(
     root: string,
-    options: { debounceMs?: number; bufferSize?: number } = {},
+    options: {
+      debounceMs?: number;
+      bufferSize?: number;
+      /** Injection point for tests; defaults to node:fs watch. */
+      watch?: typeof watch;
+    } = {},
   ): Promise<WorkspaceWatcher> {
+    const watchFolder = options.watch ?? watch;
     const reader = await WorkReader.create(root);
     const watcher = new WorkspaceWatcher(
       reader,
@@ -62,7 +70,7 @@ export class WorkspaceWatcher {
     for (const folder of WATCHED) {
       const absolute = path.join(reader.root, folder);
       try {
-        const handle = watch(absolute, { recursive: true }, (_, name) => {
+        const handle = watchFolder(absolute, { recursive: true }, (_, name) => {
           if (typeof name !== "string") return;
           watcher.enqueue(
             path.posix.join(folder, name.split(path.sep).join("/")),
@@ -70,8 +78,10 @@ export class WorkspaceWatcher {
         });
         handle.on("error", () => {});
         watcher.watchers.push(handle);
-      } catch {
-        // Missing folder: nothing to watch until the server restarts.
+      } catch (error) {
+        // A missing folder is fine until restart; a platform limit is not.
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+          watcher.supported = false;
       }
     }
     return watcher;

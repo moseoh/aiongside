@@ -218,3 +218,18 @@ test("drops the oldest events once the replay buffer is full", async () => {
     "work/WORK-1/c.md",
   ]);
 });
+
+test("reports unsupported recursive watching instead of silently emitting nothing", async () => {
+  const root = await fixture();
+  const watcher = await WorkspaceWatcher.start(root, {
+    watch: () => {
+      throw Object.assign(new Error("recursive watch unavailable"), {
+        code: "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM",
+      });
+    },
+  });
+  watchers.push(watcher);
+  expect(watcher.supported).toBe(false);
+  const supported = await watch(root);
+  expect(supported.supported).toBe(true);
+});

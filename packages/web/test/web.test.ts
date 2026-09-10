@@ -640,3 +640,16 @@ test("ends open event streams when the server closes", async () => {
   expect(await stream.ended()).toBe(true);
   expect(Date.now() - started).toBeLessThan(900);
 });
+
+test("tells clients when watching is unsupported and closes the stream", async () => {
+  const root = await fixture();
+  const server = await startWebServer(root, {
+    watch: () => {
+      throw new Error("unsupported");
+    },
+  });
+  servers.push(server);
+  const stream = await sse(server.url);
+  expect(await stream.next()).toMatchObject({ data: { state: "unsupported" } });
+  expect(await stream.ended()).toBe(true);
+});
