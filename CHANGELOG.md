@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.6.1 - 2026-09-11
+
+### Changed
+
+- After moving a Work to done, agents now report their Knowledge decision in one line: the updated key and what was added, or why no update is needed.
+- Managed instructions list the Web View command (`aiongside view web --background --json`) among common commands.
+
+### Existing workspaces
+
+Run `aiongside workspace upgrade` in each existing workspace to update managed instructions.
+
 ## 0.6.0 - 2026-09-10
 
 ### Added
