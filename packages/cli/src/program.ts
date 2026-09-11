@@ -600,11 +600,13 @@ export function createProgram(): Command {
     )
     .option("--port <port>", "Listen on this port (default: an available port)")
     .option("--background", "Run in the background; stop with view web stop")
+    .option("--json", "Print the URL, workspace and stop command as JSON")
     .action(
       async (options: {
         host?: string;
         port?: string;
         background?: boolean;
+        json?: boolean;
       }) => {
         if (process.env.AIONGSIDE_WEB_CHILD === "1" && process.send) {
           await runWebWorker();
@@ -627,8 +629,22 @@ export function createProgram(): Command {
         const server = options.background
           ? await startBackgroundWeb(root, port, options.host)
           : await runForegroundWeb(root, port, options.host);
+        const stop = options.background
+          ? `aiongside --root ${JSON.stringify(server.root)} view web stop`
+          : "Ctrl+C";
+        if (options.json) {
+          ui.json({
+            version: 1,
+            url: server.url,
+            root: server.root,
+            background: options.background === true,
+            network: server.network,
+            stop,
+          });
+          return;
+        }
         process.stdout.write(
-          `${server.url}\nWorkspace: ${server.root}\n${options.background ? `Stop: aiongside --root ${JSON.stringify(server.root)} view web stop` : "Stop: Ctrl+C"}\n`,
+          `${server.url}\nWorkspace: ${server.root}\nStop: ${stop}\n`,
         );
         if (server.network)
           ui.warning(
@@ -640,7 +656,8 @@ export function createProgram(): Command {
   web
     .command("stop")
     .description("Stop this workspace's background Web View")
-    .action(async () => {
+    .option("--json", "Print the stop result as JSON")
+    .action(async (options: { json?: boolean }) => {
       if (
         web.opts().background ||
         web.opts().port !== undefined ||
@@ -651,8 +668,14 @@ export function createProgram(): Command {
           "AIO-WEB-OPTION",
         );
       const root = await commandRoot(program);
+      const stopped = await stopBackgroundWeb(root);
+      // Commander lets the parent take a trailing --json; honor both spellings.
+      if (options.json || web.opts().json) {
+        ui.json({ version: 1, root, stopped });
+        return;
+      }
       ui.success(
-        (await stopBackgroundWeb(root))
+        stopped
           ? "Background Web View stopped"
           : "No background Web View is running",
       );

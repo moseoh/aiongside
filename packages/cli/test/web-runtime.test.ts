@@ -232,3 +232,29 @@ test("stale runtime is recoverable without signalling a PID", async () => {
   );
   expect(url((await cli(context, ["--background"])).stdout)).toBeTruthy();
 }, 20_000);
+
+test("--json reports the URL, workspace and stop command for background start and stop", async () => {
+  const context = await fixture();
+  const started = JSON.parse(
+    (await cli(context, ["--background", "--json"])).stdout,
+  );
+  expect(started).toMatchObject({
+    version: 1,
+    root: context.root,
+    background: true,
+    network: false,
+  });
+  expect(started.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+  expect(started.stop).toContain("view web stop");
+  expect(JSON.stringify(started)).not.toContain(
+    (await state(context)).value.token,
+  );
+  const again = JSON.parse(
+    (await cli(context, ["--background", "--json"])).stdout,
+  );
+  expect(again.url).toBe(started.url);
+  const stopped = JSON.parse((await cli(context, ["stop", "--json"])).stdout);
+  expect(stopped).toEqual({ version: 1, root: context.root, stopped: true });
+  const idle = JSON.parse((await cli(context, ["stop", "--json"])).stdout);
+  expect(idle).toEqual({ version: 1, root: context.root, stopped: false });
+});

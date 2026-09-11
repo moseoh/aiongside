@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.6.2 - 2026-09-11
+
+### Added
+
+- `aiongside view web --json` and `aiongside view web stop --json` return the URL, workspace, and stop command as JSON, matching the command listed in managed instructions.
+
 ## 0.6.1 - 2026-09-11
 
 ### Changed
