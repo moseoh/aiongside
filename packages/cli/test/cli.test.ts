@@ -478,6 +478,12 @@ describe("CLI", () => {
     const root = await tempRoot();
     const initialized = await cli(["init", root]);
     expect(initialized.stdout).toContain(".aiongside/instructions.md");
+    const managed = await readFile(
+      path.join(root, ".aiongside/instructions.md"),
+      "utf8",
+    );
+    expect(managed).toContain("aiongside view web --background --json");
+    expect(managed).toContain("report the decision to the user");
     expect(initialized.stdout).toContain(".claude/settings.json");
     expect(initialized.stdout).toContain(".codex/hooks.json");
     expect(initialized.stdout).toContain("Approve project Hooks");
@@ -1430,6 +1436,9 @@ describe("CLI", () => {
       expect.objectContaining({ kind: "knowledge-update", workId: "WORK-1" }),
     ]);
     expect(done.postActions[0].message).toContain("no further action");
+    expect(done.postActions[0].message).toContain(
+      "report the decision to the user",
+    );
     expect(done.postActions[0].message).toContain("Read work/WORK-1/record.md");
     expect(done.postActions[0].message).toContain("aiongside knowledge list");
     expect(done.postActions[0].message).toContain(

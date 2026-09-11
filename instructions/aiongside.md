@@ -9,8 +9,11 @@ Common commands:
 - Apply status change: aiongside work move <id> <status> --json
 - Check document integrity: aiongside check --json
 - Check agent integration: aiongside doctor --json
+- Open the Web View: aiongside view web --background --json
 
 Follow command results, including reasons and recovery hints. Previewing a change does not authorize applying it; follow applicable approval rules.
+
+After moving a Work to done, decide whether Knowledge needs its results and report the decision to the user in one line before finishing: the updated key and what was added, or why no update is needed. Do not add relationships for reference-only topics.
 
 ## Document and folder roles
 
