@@ -2,6 +2,8 @@
 
 A local-first workspace for people and AI. The CLI owns metadata and mechanical checks; people and AI own document content and decisions.
 
+See the [user guide](docs/user-guide.md) for working with AI through natural-language requests. The guide ships in the npm package for offline use. Managed instructions provide a short introduction; AI reads the guide only for follow-up or specific usage questions. After updating an existing installation, run `aiongside workspace upgrade` in each workspace to refresh its instructions and local guide path.
+
 ## Quick start
 
 Requires Node.js 22 or later. Bun is needed only for source development.

@@ -363,6 +363,16 @@ describe("workspace lifecycle", () => {
       expect(await pathExists(path.join(root, target))).toBe(false);
     const context = await readWorkspaceContext(root);
     expect(context.instructions).toBe(await loadAgentInstructionsSource());
+    expect(context.instructions).not.toContain("{{AIONGSIDE_USER_GUIDE_PATH}}");
+    const guidePath = JSON.parse(
+      context.instructions?.match(
+        /local user guide at (".*") and answer/,
+      )?.[1] ?? "null",
+    );
+    expect(path.isAbsolute(guidePath)).toBe(true);
+    const guide = await readFile(guidePath, "utf8");
+    expect(guide).toContain("# Working with AIongside");
+    expect(context.instructions).not.toContain("## Start work");
     expect(context.instructions).not.toContain("context --json");
     expect(context.instructions).toContain("aiongside check --json");
     expect(context.instructions).toContain("aiongside doctor --json");

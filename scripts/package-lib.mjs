@@ -33,6 +33,7 @@ export const expectedPackageFiles = [
   "README.md",
   "dist/agent-adapter.js",
   "dist/bin.js",
+  "docs/user-guide.md",
   "instructions/aiongside.md",
   "package.json",
 ];
@@ -215,7 +216,12 @@ export async function preparePackage({
   await rm(stageDirectory, { recursive: true, force: true });
   await mkdir(path.join(stageDirectory, "dist"), { recursive: true });
   await mkdir(path.join(stageDirectory, "instructions"), { recursive: true });
+  await mkdir(path.join(stageDirectory, "docs"), { recursive: true });
   await Promise.all([
+    copyFile(
+      path.join(repositoryRoot, "docs", "user-guide.md"),
+      path.join(stageDirectory, "docs", "user-guide.md"),
+    ),
     copyFile(
       path.join(repositoryRoot, "packages", "cli", "dist", "bin.js"),
       path.join(stageDirectory, "dist", "bin.js"),

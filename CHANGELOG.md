@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.6.3 - 2026-09-11
+
+### Added
+
+- An offline user guide bundled in the npm package, with natural-language examples for starting, continuing, and completing work with AI.
+
+### Changed
+
+- Managed instructions introduce AIongside briefly when users ask about it and direct agents to read the local guide for follow-up or specific usage questions. CLI commands are explained only when requested.
+- Workspace initialization and integration upgrades resolve the guide's installed absolute path without loading its contents into session context.
+
+### Existing workspaces
+
+Run `aiongside workspace upgrade` in each existing workspace after updating the CLI to refresh managed instructions and the local guide path.
+
 ## 0.6.2 - 2026-09-11
 
 ### Added

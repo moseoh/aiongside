@@ -11,6 +11,7 @@ import {
   stat,
 } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   calculateMarkdownBodyDigest,
   compareWorkIds,
@@ -318,7 +319,13 @@ export async function loadAgentInstructionsSource(): Promise<string> {
   ];
   for (const candidate of candidates) {
     try {
-      return await readFile(candidate, "utf8");
+      const source = await readFile(candidate, "utf8");
+      return source.replaceAll(
+        "{{AIONGSIDE_USER_GUIDE_PATH}}",
+        JSON.stringify(
+          fileURLToPath(new URL("../docs/user-guide.md", candidate)),
+        ),
+      );
     } catch (error) {
       if (!isNodeError(error) || error.code !== "ENOENT") {
         throw error;

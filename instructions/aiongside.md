@@ -1,5 +1,15 @@
 # AIongside managed instructions
 
+## Explaining AIongside to users
+
+AIongside keeps the progress, decisions, and results of work with AI in a local workspace, so people can resume from recorded context in another conversation and retain reusable knowledge.
+
+When asked what AIongside is or how to use it, first give a brief introduction in the user's language with natural-language examples such as "Register this as work" and "Continue the onboarding work from last time." Explain how the user and AI work together. Explain CLI commands only when the user asks for them.
+
+For follow-up questions or a specific usage question, read the relevant sections of the local user guide at {{AIONGSIDE_USER_GUIDE_PATH}} and answer in the user's language, adapted to their situation. Read it yourself rather than merely handing the user a link. Do not read the guide at session start or during ordinary work. It is bundled with the installed package and needs no internet access.
+
+## Managing work
+
 Use `aiongside` for work creation, status, dependencies, Knowledge document creation and contribution records, Work hash sync, and generated Views. Edit document bodies directly; let the CLI own metadata and generated files.
 
 Use known commands directly. Do not read help routinely at session start or traverse parent help commands. If syntax or options are unclear, read only the relevant command's --help.

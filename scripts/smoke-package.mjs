@@ -182,6 +182,28 @@ export async function smokePackage(tarball) {
       ),
       "utf8",
     );
+    const guidePath = JSON.parse(
+      context.instructions.match(
+        /local user guide at (".*") and answer/,
+      )?.[1] ?? "null",
+    );
+    if (
+      guidePath !==
+        path.join(
+          npmRoot.stdout.trim(),
+          "aiongside",
+          "docs",
+          "user-guide.md",
+        ) ||
+      !(await readFile(guidePath, "utf8")).includes(
+        "# Working with AIongside",
+      ) ||
+      context.instructions.includes("## Start work")
+    ) {
+      throw new Error(
+        "Installed context must locate the offline guide without loading its body.",
+      );
+    }
     if (version.stdout !== `${manifest.version}\n`) {
       throw new Error("Installed CLI version does not match package metadata.");
     }
@@ -195,7 +217,18 @@ export async function smokePackage(tarball) {
       (await readFile(
         path.join(workspace, ".aiongside", "instructions.md"),
         "utf8",
-      )) !== installedInstructions
+      )) !==
+      installedInstructions.replaceAll(
+        "{{AIONGSIDE_USER_GUIDE_PATH}}",
+        JSON.stringify(
+          path.join(
+            npmRoot.stdout.trim(),
+            "aiongside",
+            "docs",
+            "user-guide.md",
+          ),
+        ),
+      )
     ) {
       throw new Error(
         "Initialized managed instructions differ from the package source.",

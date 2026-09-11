@@ -9,6 +9,7 @@ import {
   expectedPackageFiles,
   preparePackage,
   readSourceManifest,
+  repositoryRoot,
   validatePackageDirectory,
   validatePackResult,
   validateSourceManifest,
@@ -64,6 +65,10 @@ test("prepares only the public package files", async (context) => {
   const result = await validatePackageDirectory(stageDirectory);
 
   assert.deepEqual(result.files, expectedPackageFiles);
+  assert.equal(
+    await readFile(path.join(stageDirectory, "docs", "user-guide.md"), "utf8"),
+    await readFile(path.join(repositoryRoot, "docs", "user-guide.md"), "utf8"),
+  );
   assert.equal(result.manifest.version, source.version);
   assert.match(
     await readFile(path.join(stageDirectory, "dist", "bin.js"), "utf8"),
