@@ -293,6 +293,20 @@ try {
     await fullscreenButton.getAttribute("aria-label"),
     /Exit full screen/,
   );
+  await htmlFrame.locator("body").click();
+  await page.keyboard.press("Escape");
+  await page.waitForFunction(
+    () =>
+      !document
+        .querySelector('[data-testid="document"]')
+        ?.classList.contains("fixed"),
+  );
+  await fullscreenButton.click();
+  await page.waitForFunction(() =>
+    document
+      .querySelector('[data-testid="document"]')
+      ?.classList.contains("fixed"),
+  );
   await fullscreenButton.click();
   await page.waitForFunction(
     () =>
