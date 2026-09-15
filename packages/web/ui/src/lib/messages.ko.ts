@@ -83,6 +83,8 @@ export const messagesKo: Record<MessageKey, string> = {
   download: "다운로드",
   downloadOnly:
     "미리보기를 제공하지 않는 파일입니다. 다운로드해서 다른 앱으로 여세요.",
+  enterFullscreen: "전체 화면으로 보기",
+  exitFullscreen: "전체 화면 닫기",
   fileTooLarge: "1 MiB보다 큰 파일입니다.",
   noOverview: "이 업무에는 아직 Overview가 없습니다. Record를 여세요.",
   openRecord: "Record 열기",

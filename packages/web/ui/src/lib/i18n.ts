@@ -82,6 +82,8 @@ const en = {
   download: "Download",
   downloadOnly:
     "No preview for this file. Download it to open with another application.",
+  enterFullscreen: "Open full screen",
+  exitFullscreen: "Exit full screen",
   fileTooLarge: "This file is larger than 1 MiB.",
   noOverview: "This Work has no Overview yet. Open the Record instead.",
   openRecord: "Open Record",

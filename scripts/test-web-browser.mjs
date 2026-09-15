@@ -282,6 +282,28 @@ try {
       .evaluate((element) => getComputedStyle(element).color),
     "rgb(255, 0, 0)",
   );
+  const fullscreenButton = document.getByTestId("toggle-html-fullscreen");
+  await fullscreenButton.click();
+  await page.waitForFunction(() =>
+    document
+      .querySelector('[data-testid="document"]')
+      ?.classList.contains("fixed"),
+  );
+  assert.match(
+    await fullscreenButton.getAttribute("aria-label"),
+    /Exit full screen/,
+  );
+  await fullscreenButton.click();
+  await page.waitForFunction(
+    () =>
+      !document
+        .querySelector('[data-testid="document"]')
+        ?.classList.contains("fixed"),
+  );
+  assert.match(
+    await fullscreenButton.getAttribute("aria-label"),
+    /Open full screen/,
+  );
   await tree.getByText("invitation.md", { exact: true }).click();
   await heading("Invitation");
   await document.getByRole("link", { name: "Related work" }).click();

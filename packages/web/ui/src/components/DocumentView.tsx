@@ -1,5 +1,12 @@
-import { CheckIcon, CopyIcon, DownloadIcon, RefreshCwIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import {
+  CheckIcon,
+  CopyIcon,
+  DownloadIcon,
+  Maximize2Icon,
+  Minimize2Icon,
+  RefreshCwIcon,
+} from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { Markdown } from "@/components/Markdown";
 import { Button } from "@/components/ui/button";
 import {
@@ -82,6 +89,8 @@ export function DocumentView({
   const { t, size } = useT();
   const live = useLive();
   const [reloads, setReloads] = useState(0);
+  const [fullscreen, setFullscreen] = useState(false);
+  const documentRef = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<State>({
     loading: true,
     document: null,
@@ -90,6 +99,7 @@ export function DocumentView({
   const changedEvent = live.changed.has(path)
     ? live.recent.find((event) => event.path === path)
     : undefined;
+  const document = state.document;
   // Keep the previous document on screen while the next one loads, so
   // switching files replaces content instead of flashing a loading state.
   // biome-ignore lint/correctness/useExhaustiveDependencies: reloads forces a re-read on Reload
@@ -116,7 +126,54 @@ export function DocumentView({
     };
   }, [path, reloads]);
 
-  const document = state.document;
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      setFullscreen(
+        globalThis.document.fullscreenElement === documentRef.current,
+      );
+    };
+    globalThis.document.addEventListener(
+      "fullscreenchange",
+      onFullscreenChange,
+    );
+    return () =>
+      globalThis.document.removeEventListener(
+        "fullscreenchange",
+        onFullscreenChange,
+      );
+  }, []);
+
+  useEffect(() => {
+    if (!fullscreen || globalThis.document.fullscreenElement) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFullscreen(false);
+    };
+    globalThis.addEventListener("keydown", onKeyDown);
+    return () => globalThis.removeEventListener("keydown", onKeyDown);
+  }, [fullscreen]);
+
+  useEffect(() => {
+    if (document?.kind !== "html") setFullscreen(false);
+  }, [document?.kind]);
+
+  const toggleFullscreen = async () => {
+    const target = documentRef.current;
+    if (!target) return;
+    if (globalThis.document.fullscreenElement === target) {
+      await globalThis.document.exitFullscreen();
+      return;
+    }
+    if (globalThis.document.fullscreenElement) {
+      await globalThis.document.exitFullscreen();
+    }
+    try {
+      await target.requestFullscreen();
+    } catch {
+      // HTTP local hosts may not expose the native Fullscreen API.
+      setFullscreen(true);
+    }
+  };
+
   const kindLabel = document
     ? document.kind === "markdown"
       ? t("markdown")
@@ -128,7 +185,10 @@ export function DocumentView({
     : null;
   return (
     <div
-      className="flex flex-col overflow-hidden rounded-lg border bg-card"
+      className={`flex flex-col overflow-hidden border bg-card ${
+        fullscreen ? "fixed inset-0 z-50 m-0 rounded-none" : "rounded-lg"
+      }`}
+      ref={documentRef}
       data-testid="document"
     >
       <div className="flex h-10 shrink-0 items-center gap-2.5 border-b bg-background px-4 text-xs text-muted-foreground">
@@ -143,6 +203,30 @@ export function DocumentView({
           <span className="shrink-0">
             {kindLabel} · {size(document.size)}
           </span>
+        ) : null}
+        {document?.kind === "html" ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="muted"
+                size="icon-sm"
+                aria-label={
+                  fullscreen ? t("exitFullscreen") : t("enterFullscreen")
+                }
+                data-testid="toggle-html-fullscreen"
+                onClick={() => void toggleFullscreen()}
+              >
+                {fullscreen ? (
+                  <Minimize2Icon className="size-3.5" />
+                ) : (
+                  <Maximize2Icon className="size-3.5" />
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {fullscreen ? t("exitFullscreen") : t("enterFullscreen")}
+            </TooltipContent>
+          </Tooltip>
         ) : null}
         {meta}
         <span className="flex-1" />
@@ -197,7 +281,7 @@ export function DocumentView({
           </article>
         ) : document.kind === "html" ? (
           <iframe
-            className="h-[720px] w-full border-0 bg-white"
+            className={`${fullscreen ? "h-[calc(100vh-40px)]" : "h-[720px]"} w-full border-0 bg-white`}
             data-testid="html-preview"
             title={document.path}
             srcDoc={document.source}
