@@ -34,6 +34,7 @@ import {
   type WorkDetail,
   type WorkTransition,
 } from "@/lib/api";
+import { copyText } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
 import { flattenDocuments, useKnowledge } from "@/lib/knowledge";
 import { routeForPath, workFilePath } from "@/lib/links";
@@ -44,28 +45,6 @@ type State =
   | { status: "loading" }
   | { status: "ready"; work: WorkDetail }
   | { status: "error"; message: string };
-
-/** Clipboard API needs a secure context; plain-HTTP hosts fall back to execCommand. */
-async function copyText(text: string): Promise<boolean> {
-  if (navigator.clipboard) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch {
-      // fall through
-    }
-  }
-  const area = document.createElement("textarea");
-  area.value = text;
-  area.setAttribute("readonly", "");
-  area.style.position = "fixed";
-  area.style.opacity = "0";
-  document.body.append(area);
-  area.select();
-  const ok = document.execCommand("copy");
-  area.remove();
-  return ok;
-}
 
 /** Copies the Work ID to the clipboard; shows a check mark briefly after success. */
 function CopyIdButton({ id }: { id: string }) {

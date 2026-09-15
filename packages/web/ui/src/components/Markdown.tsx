@@ -1,11 +1,68 @@
+import { CheckIcon, CopyIcon } from "lucide-react";
 import type { ComponentProps } from "react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { Link } from "react-router";
 import remarkGfm from "remark-gfm";
+import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { copyText } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
 import { resolveImage, resolveLink } from "@/lib/links";
 
 const plugins = [remarkGfm];
+
+/** Adds a copy action without changing the Markdown source or loading a highlighter. */
+function CodeBlock({ children, ...rest }: ComponentProps<"pre">) {
+  const { t } = useT();
+  const blockRef = useRef<HTMLPreElement>(null);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 1500);
+    return () => clearTimeout(timer);
+  }, [copied]);
+
+  const copy = () => {
+    const text = blockRef.current?.querySelector("code")?.textContent;
+    if (text === undefined) return;
+    void copyText(text).then((ok) => setCopied(ok));
+  };
+
+  return (
+    <div className="code-block">
+      <pre ref={blockRef} {...rest}>
+        {children}
+      </pre>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            className="code-copy-button"
+            variant="muted"
+            size="icon-sm"
+            aria-label={copied ? t("copiedCode") : t("copyCode")}
+            data-testid="copy-code"
+            onClick={copy}
+          >
+            {copied ? (
+              <CheckIcon className="size-3.5 text-primary" />
+            ) : (
+              <CopyIcon className="size-3.5" />
+            )}
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>
+          {copied ? t("copiedCode") : t("copyCode")}
+        </TooltipContent>
+      </Tooltip>
+    </div>
+  );
+}
 
 /**
  * Renders a workspace document. Raw HTML is dropped by react-markdown; every
@@ -66,6 +123,9 @@ export function Markdown({ source, path }: { source: string; path: string }) {
     ),
     input: ({ node: _node, ...rest }) => (
       <input {...rest} disabled readOnly aria-readonly />
+    ),
+    pre: ({ children, node: _node, ...rest }) => (
+      <CodeBlock {...rest}>{children}</CodeBlock>
     ),
   };
   return (

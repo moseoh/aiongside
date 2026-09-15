@@ -52,6 +52,8 @@ export const messagesKo: Record<MessageKey, string> = {
   breadcrumbWork: "업무",
   copyId: "ID 복사",
   copiedId: "복사됨",
+  copyCode: "코드 복사",
+  copiedCode: "코드 복사됨",
   tabDetail: "상세보기",
   tabHistory: "이력",
   historyTime: "시각",

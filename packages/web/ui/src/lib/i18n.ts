@@ -51,6 +51,8 @@ const en = {
   breadcrumbWork: "Work",
   copyId: "Copy ID",
   copiedId: "Copied",
+  copyCode: "Copy code",
+  copiedCode: "Copied code",
   tabDetail: "Details",
   tabHistory: "History",
   historyTime: "Time",
