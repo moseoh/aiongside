@@ -107,6 +107,7 @@ export const messagesKo: Record<MessageKey, string> = {
   sizeMb: "{n} MB",
   sizeB: "{n} B",
   markdown: "Markdown",
+  html: "HTML",
   text: "텍스트",
   file: "파일",
   today: "오늘",

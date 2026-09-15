@@ -105,6 +105,7 @@ const en = {
   sizeMb: "{n} MB",
   sizeB: "{n} B",
   markdown: "Markdown",
+  html: "HTML",
   text: "Text",
   file: "File",
   today: "Today",

@@ -66,7 +66,12 @@ export interface DirectoryEntry {
 }
 
 export type Document =
-  | { path: string; size: number; kind: "markdown" | "text"; source: string }
+  | {
+      path: string;
+      size: number;
+      kind: "markdown" | "text" | "html";
+      source: string;
+    }
   | { path: string; size: number; kind: "download" };
 
 export type KnowledgeNode =

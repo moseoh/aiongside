@@ -50,7 +50,7 @@ export async function startWebServer(
   const server = createServer(async (request, response) => {
     response.setHeader(
       "Content-Security-Policy",
-      "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+      "default-src 'self' data: blob: http: https:; script-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: http: https:; style-src 'self' 'unsafe-inline' data: blob: http: https:; img-src 'self' data: blob: http: https:; connect-src 'self' data: blob: http: https:; font-src 'self' data: blob: http: https:; frame-src 'self' data: blob: http: https:; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
     );
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Referrer-Policy", "no-referrer");

@@ -120,9 +120,11 @@ export function DocumentView({
   const kindLabel = document
     ? document.kind === "markdown"
       ? t("markdown")
-      : document.kind === "text"
-        ? t("text")
-        : t("file")
+      : document.kind === "html"
+        ? t("html")
+        : document.kind === "text"
+          ? t("text")
+          : t("file")
     : null;
   return (
     <div
@@ -193,6 +195,13 @@ export function DocumentView({
           <article className="max-w-[760px] px-8 py-7">
             <Markdown source={document.source} path={document.path} />
           </article>
+        ) : document.kind === "html" ? (
+          <iframe
+            className="h-[720px] w-full border-0 bg-white"
+            data-testid="html-preview"
+            title={document.path}
+            srcDoc={document.source}
+          />
         ) : document.kind === "text" ? (
           <pre className="max-w-[760px] whitespace-pre-wrap px-8 py-7 font-mono text-[12.5px] leading-relaxed">
             {document.source}

@@ -84,6 +84,10 @@ try {
       `work/${id}/deliverables/invitation.md`,
       "# Invitation\n\nWelcome to the September workshop.\n\n| Item | Value |\n| --- | --- |\n| Venue | C room |\n| Participants | 12 |\n\n[Related work](../../WORK-2/overview.md)\n\n[Venue rules](../../../knowledge/venue-rules.md)\n\n[Legacy note](../../../.legacy/secret.md)\n\n[Script link](javascript:alert(1))\n\n<script>window.injected = true</script>\n\n![tracking](https://invalid.example/pixel)\n\n- [x] Sent\n- [ ] Confirmed\n",
     );
+    await put(
+      `work/${id}/deliverables/preview.html`,
+      "<!doctype html><html><head><style>h1 { color: rgb(255, 0, 0); }</style></head><body><h1>HTML preview</h1><script>document.body.dataset.rendered = 'yes';</script></body></html>\n",
+    );
   }
   await put(
     "work/WORK-7/record.md",
@@ -233,7 +237,7 @@ try {
     0,
   );
 
-  // 5. Keyboard: Right expands, Down moves, Enter opens; then Markdown policy.
+  // 5. Keyboard: Right expands, Down moves, Enter opens; then document policies.
   await tree.locator('[data-tree-path="work/WORK-1/deliverables"]').focus();
   await page.keyboard.press("ArrowRight");
   await tree.getByText("invitation.md", { exact: true }).waitFor();
@@ -263,6 +267,23 @@ try {
   assert.equal(await document.locator("span.unsupported").count(), 2);
   assert.equal(await document.locator('a[href^="javascript:"]').count(), 0);
   assert.equal(await document.locator('input[type="checkbox"]').count(), 2);
+  await tree.getByText("preview.html", { exact: true }).click();
+  const htmlPreview = document.getByTestId("html-preview");
+  await htmlPreview.waitFor();
+  const htmlFrame = htmlPreview.contentFrame();
+  assert.equal(await htmlFrame.getByText("HTML preview").count(), 1);
+  assert.equal(
+    await htmlFrame.locator("body").getAttribute("data-rendered"),
+    "yes",
+  );
+  assert.equal(
+    await htmlFrame
+      .getByText("HTML preview")
+      .evaluate((element) => getComputedStyle(element).color),
+    "rgb(255, 0, 0)",
+  );
+  await tree.getByText("invitation.md", { exact: true }).click();
+  await heading("Invitation");
   await document.getByRole("link", { name: "Related work" }).click();
   await page.waitForURL(/\/work\/WORK-2$/);
   await heading("Confirm venue capacity");

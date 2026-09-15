@@ -287,7 +287,7 @@ export class WorkReader {
       if (
         length > PREVIEW_LIMIT ||
         bytes.includes(0) ||
-        /\.(?:html?|svg|xml|xhtml)$/i.test(relative)
+        /\.(?:svg|xml|xhtml)$/i.test(relative)
       )
         return { path: relative, size, kind: "download" as const };
       let source: string;
@@ -297,6 +297,7 @@ export class WorkReader {
         return { path: relative, size, kind: "download" as const };
       }
       const markdown = /\.md$/i.test(relative);
+      const html = /\.html?$/i.test(relative);
       if (markdown && source.startsWith("---")) {
         try {
           source = parseMarkdownDocument(source).body;
@@ -307,7 +308,11 @@ export class WorkReader {
       return {
         path: relative,
         size,
-        kind: markdown ? ("markdown" as const) : ("text" as const),
+        kind: html
+          ? ("html" as const)
+          : markdown
+            ? ("markdown" as const)
+            : ("text" as const),
         source,
       };
     } finally {

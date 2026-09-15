@@ -387,7 +387,7 @@ test("limits previews and sends active formats as attachment downloads", async (
   for (const [name, value, kind] of [
     ["limit.txt", "x".repeat(1024 * 1024), "text"],
     ["large.txt", "x".repeat(1024 * 1024 + 1), "download"],
-    ["page.html", "<script>alert(1)</script>", "download"],
+    ["page.html", "<h1>HTML preview</h1>", "html"],
     ["image.svg", '<svg onload="alert(1)"></svg>', "download"],
     ["binary.dat", Buffer.from([0, 255, 2]), "download"],
   ] as const) {
@@ -429,7 +429,7 @@ test("rejects foreign origins, rebinding hosts and unauthenticated control", asy
   });
   expect(status).toBe(403);
   expect((await fetch(url)).headers.get("content-security-policy")).toContain(
-    "default-src 'none'",
+    "script-src 'self' 'unsafe-inline'",
   );
 });
 
