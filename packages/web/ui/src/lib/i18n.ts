@@ -53,6 +53,8 @@ const en = {
   copiedId: "Copied",
   copyCode: "Copy code",
   copiedCode: "Copied code",
+  copyPath: "Copy path",
+  copiedPath: "Copied path",
   tabDetail: "Details",
   tabHistory: "History",
   historyTime: "Time",

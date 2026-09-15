@@ -1,7 +1,14 @@
-import { DownloadIcon, RefreshCwIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, DownloadIcon, RefreshCwIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Markdown } from "@/components/Markdown";
+import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { api, type Document, errorMessage } from "@/lib/api";
+import { copyText } from "@/lib/clipboard";
 import { formatElapsed, useT } from "@/lib/i18n";
 import { markOpened, useLive } from "@/lib/live";
 
@@ -24,6 +31,41 @@ interface State {
   loading: boolean;
   document: Document | null;
   error: string | null;
+}
+
+/** Copies the displayed document path and shows a check mark briefly after success. */
+function CopyPathButton({ path }: { path: string }) {
+  const { t } = useT();
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 1500);
+    return () => clearTimeout(timer);
+  }, [copied]);
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          variant="muted"
+          size="icon-sm"
+          aria-label={copied ? t("copiedPath") : t("copyPath")}
+          data-testid="copy-path"
+          onClick={() => {
+            void copyText(path).then((ok) => setCopied(ok));
+          }}
+        >
+          {copied ? (
+            <CheckIcon className="size-3.5 text-primary" />
+          ) : (
+            <CopyIcon className="size-3.5" />
+          )}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>
+        {copied ? t("copiedPath") : t("copyPath")}
+      </TooltipContent>
+    </Tooltip>
+  );
 }
 
 /**
@@ -89,11 +131,12 @@ export function DocumentView({
     >
       <div className="flex h-10 shrink-0 items-center gap-2.5 border-b bg-background px-4 text-xs text-muted-foreground">
         <span
-          className="truncate font-mono text-foreground"
+          className="min-w-0 truncate font-mono text-foreground"
           data-testid="document-path"
         >
           {path}
         </span>
+        <CopyPathButton path={path} />
         {document ? (
           <span className="shrink-0">
             {kindLabel} · {size(document.size)}

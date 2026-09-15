@@ -54,6 +54,8 @@ export const messagesKo: Record<MessageKey, string> = {
   copiedId: "복사됨",
   copyCode: "코드 복사",
   copiedCode: "코드 복사됨",
+  copyPath: "경로 복사",
+  copiedPath: "경로 복사됨",
   tabDetail: "상세보기",
   tabHistory: "이력",
   historyTime: "시각",

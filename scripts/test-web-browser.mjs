@@ -253,6 +253,7 @@ try {
   await tree.getByText("invitation.md", { exact: true }).click();
   await heading("Invitation");
   const document = page.getByTestId("document");
+  assert.equal(await document.getByTestId("copy-path").count(), 1);
   assert.equal(await document.locator("table").count(), 1);
   assert.equal(await page.evaluate(() => window.injected), undefined);
   assert.equal(
