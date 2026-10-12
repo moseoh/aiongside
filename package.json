@@ -29,11 +29,11 @@
     "dev:ui": "cd packages/web/ui && bunx vite"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.0.0",
+    "@biomejs/biome": "^2.5.15",
     "@types/node": "^22.0.0",
-    "playwright": "1.62.1",
+    "playwright": "1.64.0",
     "typescript": "^6.0.0",
     "vitest": "^4.0.0",
-    "yaml": "^2.0.0"
+    "yaml": "^2.9.1"
   }
 }
